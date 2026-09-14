@@ -43,6 +43,9 @@ int32 NameArray::GetNumElements()
 	if (!NamesLayout || NamesLayout->GetType() != ENamesType::Array)
 		return 0;
 
+	if (NamesLayout->NumElements == -1)
+		return 0;
+
 	return GMemory->Read<int32>(GNames + NamesLayout->NumElements);
 }
 
