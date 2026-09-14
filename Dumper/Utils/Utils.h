@@ -16,6 +16,12 @@
 
 #include "Encoding/UtfN.hpp"
 
+#ifdef __ANDROID__
+#include "KittyMemoryEx/KittyAsm.hpp"
+#else
+#include "KittyMemory/KittyAsm.hpp"
+#endif
+
 class IMemory;
 
 /// @brief Utils shared across the dumper.
@@ -214,6 +220,9 @@ namespace Utils
 	/// @brief ARM64 Utils.
 	namespace Arm64
 	{
+		/// @brief Decodes a single ARM64 instruction at Address.
+		KittyInsnArm64 DecodeInsn(uint32_t Insn, uintptr_t Address);
+
 		/// @brief Resolves the target of `ADRP page ; ADD/LDR Rd, Rd, #off` at Insns[0..N).
 		uintptr_t Find_ADRP_Final_Address(const std::vector<uint32_t>& Insns, uintptr_t Address);
 	}
@@ -221,6 +230,9 @@ namespace Utils
 	/// @brief ARM32 Utils.
 	namespace Arm32
 	{
+		/// @brief Decodes a single ARM32 instruction at Address.
+		KittyInsnArm32 DecodeInsn(uint32_t Insn, uint32_t Address);
+
 		/// @brief Resolves the target of `LDR Rd, [PC, #off] ; ADD Rd, PC, Rd` at Insns[0..N).
 		/// Returns 0 if the pattern is not found.
 		uintptr_t Find_LDR_ADD_PC_Address(const std::vector<uint32_t>& Insns, uintptr_t Address, IMemory* Memory);

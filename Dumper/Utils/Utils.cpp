@@ -20,6 +20,11 @@ namespace Utils
 
 	namespace Arm64
 	{
+		KittyInsnArm64 DecodeInsn(uint32_t Insn, uintptr_t Address)
+		{
+			return KittyArm64::decodeInsn(Insn, Address);
+		}
+
 		uintptr_t Find_ADRP_Final_Address(const std::vector<uint32_t>& Insns, uintptr_t Address)
 		{
 			if (Insns.empty())
@@ -47,6 +52,11 @@ namespace Utils
 
 	namespace Arm32
 	{
+		KittyInsnArm32 DecodeInsn(uint32_t Insn, uint32_t Address)
+		{
+			return KittyArm32::decodeInsn(Insn, Address);
+		}
+
 		uintptr_t Find_LDR_ADD_PC_Address(const std::vector<uint32_t>& Insns, uintptr_t Address, IMemory* Memory)
 		{
 			for (size_t i = 0; i + 1 < Insns.size(); i++)
