@@ -9,7 +9,7 @@ public:
 
 	std::vector<std::string> GetSupportedGames() const override
 	{
-		return {"com.proxima.dfm", "com.garena.game.df"};
+		return {"com.proxima.dfm", "com.garena.game.df", "com.tencent.tmgp.dfm"};
 	}
 
 	// https://github.com/MJx0/AndUEDumper/issues/66
