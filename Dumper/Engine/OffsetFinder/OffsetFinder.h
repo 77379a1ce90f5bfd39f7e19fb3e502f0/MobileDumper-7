@@ -8,9 +8,12 @@
 #include <unordered_map>
 #include <vector>
 
+#include "../../Settings.h"
+
 #include "../../Memory/IMemory.h"
 #include "../../Utils/Logger.h"
 #include "../Unreal/NameArray.h"
+
 
 namespace OffsetFinder
 {
@@ -292,7 +295,7 @@ namespace OffsetFinder
 			// MaxAccessedSizeInUObject of a page boundary might read past its actual allocation.
 			const void* CurrentObjectOrField = (*DataSetStartIterator).GetAddress();
 			if (!CurrentObjectOrField)
-				break;
+				continue;
 
 			const bool bIsGoingPastPageBounds = (reinterpret_cast<const uintptr_t>(CurrentObjectOrField) & (SmallPageSize - 1)) > (SmallPageSize - MaxAccessedSizeInUObject);
 			if (bIsGoingPastPageBounds)
@@ -334,7 +337,7 @@ namespace OffsetFinder
 				if (CmpIdx <= 0)
 					continue;
 				const std::string Name = NameArray::GetNameEntry(CmpIdx).GetString();
-				const bool bValid      = !Name.empty() && Name.size() <= 256 && std::all_of(Name.begin(), Name.end(), [](char C)
+				const bool bValid      = !Name.empty() && Name.size() <= GSettings.General.MaxFNameLen && std::all_of(Name.begin(), Name.end(), [](char C)
 				{ return C >= 0x20 && C <= 0x7E; });
 				if (bValid)
 					Score++;
