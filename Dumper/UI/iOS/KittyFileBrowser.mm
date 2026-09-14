@@ -942,7 +942,7 @@ static NSString* SelectionKey(NSURL* Url)
 		  // selection can now span folders, so two different "SDK" directories under
 		  // different parents would otherwise produce the same zip path - the second
 		  // overwriting the first, and both share entries pointing at one file.
-		  NSString* Relative = Entry.url.path;
+		  NSString* Relative = Entry.url.URLByResolvingSymlinksInPath.path;
 		  if ([Relative hasPrefix:RootPath])
 			  Relative = [Relative substringFromIndex:RootPath.length];
 
@@ -1084,7 +1084,7 @@ static NSString* SelectionKey(NSURL* Url)
 	}
 
 	self.isVisible  = YES;
-	self.rootURL    = [NSURL fileURLWithPath:RootPath isDirectory:YES];
+	self.rootURL    = [[NSURL fileURLWithPath:RootPath isDirectory:YES] URLByResolvingSymlinksInPath];
 	self.currentURL = self.rootURL;
 
 	[self.selection removeAllObjects];
