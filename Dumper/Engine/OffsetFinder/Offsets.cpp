@@ -1803,7 +1803,7 @@ void FInSDKOffsets::InitLevelActorsOffset()
 	const int32 SearchStart = UObjectClass.GetStructSize() + FURLStruct.GetStructSize();
 	const int32 SearchEnd   = Level_OwningWorldProperty.GetOffset();
 
-	for (int i = SearchStart; i <= (SearchEnd - 0x10); i += sizeof(void*))
+	for (int i = SearchStart; i <= (SearchEnd - int(sizeof(TArray<void*>))); i += sizeof(void*))
 	{
 		const auto ActorArray = GMemory->Read<TArray<void*>>(Lvl + i);
 
