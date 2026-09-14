@@ -686,7 +686,13 @@
 
 	self.alertDimmingView.frame = self.bounds;
 
-	CGFloat cardWidth = self.alertContentView.bounds.size.width;
+	// Taken from the wrapper rather than the content view: both are the same width (the
+	// content view is pinned to the wrapper's edges), but the wrapper is solved by the
+	// pass above while the content view only catches up on the following one. Reading the
+	// content view here bails on the first pass, and since a subview resizing does not
+	// mark this view as needing layout, no further pass arrives - leaving the height
+	// constraint at its initial 0 and the card collapsed behind the dimming.
+	CGFloat cardWidth = self.alertCardWrapper.bounds.size.width;
 	if (cardWidth <= 0)
 		return;
 
