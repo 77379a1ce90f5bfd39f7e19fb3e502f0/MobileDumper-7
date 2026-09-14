@@ -10,7 +10,6 @@ set(DISABLED_WARNINGS
     -Wno-unused-parameter
     -Wno-unused-function
     -Wno-missing-field-initializers
-    -Wno-missing-designated-field-initializers
 )
 
 if(NOT DEFINED DUMPER_ROOT)
