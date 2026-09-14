@@ -22,7 +22,7 @@ struct FSettings
 		std::string UnrealModuleName;
 
 		/// Read limit when no explicit length field is available in the target engine version.
-		int32 MaxFNameLen = 255;
+		int32 MaxFNameLen = 512;
 	} General;
 
 	struct Generator
