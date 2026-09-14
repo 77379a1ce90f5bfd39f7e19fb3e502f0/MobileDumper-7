@@ -46,18 +46,18 @@ public:
 				break;
 		}
 
-		GLogger.FmtWrite(ELogLevel::Info, "Found {} GNames Matches via pattern.\n", Matches.size());
+		GLogger.FmtWrite(ELogLevel::Info, "GetGNames: Found {} GNames Matches via pattern.\n", Matches.size());
 
 		for (const auto& Match : Matches)
 		{
 			std::vector<uint32> Insns(10, 0);
 			GMemory->ReadBytes(Match, Insns.data(), Insns.size() * sizeof(uint32));
 
-			GLogger.FmtWrite(ELogLevel::Info, "Testing GNames Match (0x{:X}) -> 0x{:X}\n", GMemory->GetUnrealModule().AddressToOffset(Match), Match);
+			GLogger.FmtWrite(ELogLevel::Info, "GetGNames: Testing GNames Match (0x{:X}) -> 0x{:X}\n", GMemory->GetUnrealModule().AddressToOffset(Match), Match);
 			uintptr_t ADRP = Utils::Arm64::Find_ADRP_Final_Address(Insns, Match);
 			if (ADRP)
 			{
-				GLogger.FmtWrite(ELogLevel::Info, "Found GNames ADRP 0x{:X}\n", ADRP);
+				GLogger.FmtWrite(ELogLevel::Info, "GetGNames: Found GNames ADRP 0x{:X}\n", ADRP);
 				return ADRP;
 			}
 		}
@@ -67,8 +67,6 @@ public:
 
 	void DecryptGNames(uintptr_t& NamesPtr) const override
 	{
-		GLogger.FmtWrite(ELogLevel::Info, "Decrypting GNames 0x{:X}...\n", NamesPtr);
-
 		int64_t var_2;
 		int64_t var_5[16];
 
@@ -82,6 +80,5 @@ public:
 		}
 
 		NamesPtr = var_5[0];
-		GLogger.FmtWrite(ELogLevel::Info, "Decrypted GNames 0x{:X}.\n", NamesPtr);
 	}
 };
