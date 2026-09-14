@@ -77,12 +77,12 @@ public:
 			GLogger.FmtWrite(ELogLevel::Debug, "{}\n", Line);
 
 		for (const std::string& Line : Result.Evidence)
-			GLogger.FmtWrite(Result.bSuccess ? ELogLevel::Debug : ELogLevel::Info, "{}\n", Line);
+			GLogger.FmtWrite(ELogLevel::Info, "{}\n", Line);
 
 		if (!Result.bSuccess)
 		{
 			for (const std::string& Line : Result.Failures)
-				GLogger.FmtWrite(ELogLevel::Info, "{}\n", Line);
+				GLogger.FmtWrite(ELogLevel::Debug, "{}\n", Line);
 
 			return false;
 		}
@@ -167,12 +167,12 @@ public:
 			GLogger.FmtWrite(ELogLevel::Debug, "ResolveGNamesLayout: {}\n", Line);
 
 		for (const std::string& Line : Result.Evidence)
-			GLogger.FmtWrite(Result.bSuccess ? ELogLevel::Debug : ELogLevel::Info, "ResolveGNamesLayout: {}\n", Line);
+			GLogger.FmtWrite(ELogLevel::Info, "ResolveGNamesLayout: {}\n", Line);
 
 		if (!Result.bSuccess)
 		{
 			for (const std::string& Line : Result.Failures)
-				GLogger.FmtWrite(ELogLevel::Info, "ResolveGNamesLayout: {}\n", Line);
+				GLogger.FmtWrite(ELogLevel::Debug, "ResolveGNamesLayout: {}\n", Line);
 
 			return false;
 		}
@@ -186,8 +186,7 @@ public:
 	 * @brief Applies profile-specific settings overrides.
 	 * @param[in,out] Settings Settings to override.
 	 */
-	inline virtual void
-	OverrideSettings(FSettings& Settings) const
+	inline virtual void OverrideSettings(FSettings& Settings) const
 	{
 		((void)Settings);
 	}
@@ -265,10 +264,10 @@ public:
 			const int32 InChunk  = Idx % Layout->ElementsPerChunk;
 
 			uintptr_t ChunkAddr = GMemory->Read<uintptr_t>(NamesPtr + Layout->Chunks + ChunkIdx * sizeof(void*));
-			DecryptNameChunk(NamesPtr, NamesLayout, ChunkAddr);
+			DecryptNameChunk(NamesPtr, ChunkIdx, ChunkAddr);
 
 			uintptr_t NameEntry = GMemory->Read<uintptr_t>(ChunkAddr + InChunk * sizeof(void*));
-			DecryptNameEntry(NamesPtr, NamesLayout, NameEntry);
+			DecryptNameEntry(NamesPtr, NameEntry);
 
 			if (GMemory->IsAddressReadable(NameEntry))
 				return NameEntry;
@@ -285,12 +284,12 @@ public:
 
 			uintptr_t ChunksBase = NamesPtr + Layout->Blocks;
 			uintptr_t ChunkAddr  = GMemory->Read<uintptr_t>(ChunksBase + ChunkIdx * sizeof(void*));
-			DecryptNameChunk(NamesPtr, NamesLayout, ChunkAddr);
+			DecryptNameChunk(NamesPtr, ChunkIdx, ChunkAddr);
 
 			if (GMemory->IsAddressReadable(ChunkAddr))
 			{
 				uintptr_t NameEntry = ChunkAddr + InChunkOffset;
-				DecryptNameEntry(NamesPtr, NamesLayout, NameEntry);
+				DecryptNameEntry(NamesPtr, NameEntry);
 				return NameEntry;
 			}
 		}
@@ -321,7 +320,7 @@ public:
 
 			const int32 NameIdx = GMemory->Read<int32>(NameEntry + Layout->FNameEntry.Index);
 
-			IsWide  = NameIdx & Layout->FNameEntry.NameWideMask;
+			IsWide  = Layout->FNameEntry.GetIsWide ? Layout->FNameEntry.GetIsWide(NameIdx) : (NameIdx & 1);
 			StrLen  = GSettings.General.MaxFNameLen;
 			StrAddr = NameEntry + Layout->FNameEntry.String;
 		}
@@ -330,7 +329,7 @@ public:
 			auto Layout = reinterpret_cast<FNamePoolLayout*>(NamesLayout.get());
 
 			const uint16 HeaderWithoutNumber = GMemory->Read<uint16>(NameEntry + Layout->FNameEntry.Header);
-			const int32 NameLen              = HeaderWithoutNumber >> Layout->FNameEntry.LengthShiftCount;
+			const int32 NameLen              = Layout->FNameEntry.GetLength(HeaderWithoutNumber);
 
 			if (NameLen == 0)
 			{
@@ -344,7 +343,7 @@ public:
 					return std::wstring();
 			}
 
-			IsWide  = HeaderWithoutNumber & Layout->FNameEntry.NameWideMask;
+			IsWide  = Layout->FNameEntry.GetIsWide(HeaderWithoutNumber);
 			StrLen  = NameLen;
 			StrAddr = NameEntry + Layout->FNameEntry.String;
 		}
@@ -412,32 +411,23 @@ public:
 	/**
 	 * @brief Function to decrypt a FName Chunk address.
 	 * @param[in] NamesPtr GNames pointer.
-	 * @param[in] NamesLayout GNames layout. Also called from GNames layout detection
-	 *            (@ref LayoutDetection::DetectNamesLayout / TestNamesLayout, via Layouts.cpp),
-	 *            where no layout has been resolved yet; @p NamesLayout may be @c nullptr there,
-	 *            so implementations must not dereference it unconditionally.
 	 * @param[in,out] ChunkAddr FName Chunk to decrypt.
 	 */
-	inline virtual void DecryptNameChunk(uintptr_t NamesPtr, const std::unique_ptr<INamesLayout>& NamesLayout, uintptr_t& ChunkAddr) const
+	inline virtual void DecryptNameChunk(uintptr_t NamesPtr, int32 ChunkIdx, uintptr_t& ChunkAddr) const
 	{
 		((void)NamesPtr);
-		((void)NamesLayout);
+		((void)ChunkIdx);
 		((void)ChunkAddr);
 	}
 
 	/**
 	 * @brief Function to decrypt a FNameEntry address.
 	 * @param[in] NamesPtr GNames pointer.
-	 * @param[in] NamesLayout GNames layout. Also called from GNames layout detection
-	 *            (@ref LayoutDetection::DetectNamesLayout / TestNamesLayout, via Layouts.cpp),
-	 *            where no layout has been resolved yet; @p NamesLayout may be @c nullptr there,
-	 *            so implementations must not dereference it unconditionally.
 	 * @param[in,out] NameEntry NameEntry to decrypt.
 	 */
-	inline virtual void DecryptNameEntry(uintptr_t NamesPtr, const std::unique_ptr<INamesLayout>& NamesLayout, uintptr_t& NameEntry) const
+	inline virtual void DecryptNameEntry(uintptr_t NamesPtr, uintptr_t& NameEntry) const
 	{
 		((void)NamesPtr);
-		((void)NamesLayout);
 		((void)NameEntry);
 	}
 

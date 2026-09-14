@@ -41,7 +41,7 @@ namespace LayoutDetection
 		}
 
 		/*
-		 * Reads as much as the mapping allows, shrinking on failure.
+		 * Reads as much as the mapping allows, bisecting to the exact boundary on failure.
 		 *
 		 * A struct near the end of its region cannot satisfy a large fixed read even though
 		 * its early bytes are fine, and a hard failure there silently skips whatever was
@@ -49,14 +49,33 @@ namespace LayoutDetection
 		 */
 		size_t ReadBlockBestEffort(uintptr_t Address, std::vector<uint8_t>& Out, size_t MaxLen)
 		{
-			for (size_t Len = MaxLen; Len >= sizeof(uintptr_t); Len /= 2)
+			if (ReadBlock(Address, Out, MaxLen))
+				return MaxLen;
+
+			// Halving discards up to half of what is actually mapped, which can drop a field
+			// sitting just past the truncation point: a struct 0x510 bytes from the end of its
+			// mapping yields 0x400 bytes, hiding a counter at +0x400 by four bytes. Readability
+			// is a prefix property, so the exact boundary can be bisected instead.
+			size_t Good = 0;
+			size_t Bad  = MaxLen;
+
+			while (Bad - Good > 1)
 			{
-				if (ReadBlock(Address, Out, Len))
-					return Len;
+				const size_t Mid = Good + (Bad - Good) / 2;
+
+				if (IsReadable(Address, Mid))
+					Good = Mid;
+				else
+					Bad = Mid;
 			}
 
-			Out.clear();
-			return 0;
+			if (Good < sizeof(uintptr_t) || !ReadBlock(Address, Out, Good))
+			{
+				Out.clear();
+				return 0;
+			}
+
+			return Good;
 		}
 
 		uintptr_t PeekPtr(const std::vector<uint8_t>& Block, size_t Offset)
@@ -168,7 +187,19 @@ namespace LayoutDetection
 			return Result;
 		}
 
-		std::vector<FPointerRun> CollectPointerRuns(const std::vector<uint8_t>& Block)
+		/*
+		 * A run is normally a stretch of slots whose raw values are readable pointers.
+		 * A game may store block 0 encrypted, so its raw value is not a pointer at all
+		 * and no run ever begins there; the array is then either invisible or, when
+		 * unrelated pointers sit in front of it, folded into a run that starts too
+		 * early. DecryptChunkFn exposes the decrypted view, so each slot is also probed
+		 * as a would-be block 0 and a run grown from it.
+		 *
+		 * Only a slot the decryption actually rewrites into a readable address is added,
+		 * so a hook that leaves chunks untouched - the default for games without chunk
+		 * encryption - contributes nothing and leaves the raw scan's result unchanged.
+		 */
+		std::vector<FPointerRun> CollectPointerRuns(const std::vector<uint8_t>& Block, const std::function<void(int32, uintptr_t&)>& DecryptChunkFn = {})
 		{
 			std::vector<FPointerRun> Result;
 
@@ -189,6 +220,42 @@ namespace LayoutDetection
 					Offset += sizeof(void*);
 				}
 				Result.push_back(Run);
+			}
+
+			if (!DecryptChunkFn)
+				return Result;
+
+			for (size_t Start = 0; Start + sizeof(void*) <= Block.size(); Start += sizeof(void*))
+			{
+				const uintptr_t Raw = PeekPtr(Block, Start);
+
+				uintptr_t Decrypted = Raw;
+				DecryptChunkFn(0, Decrypted);
+
+				if (Decrypted == Raw || !IsReadable(Decrypted))
+					continue;
+
+				FPointerRun Run;
+				Run.Offset = static_cast<int32>(Start);
+
+				for (size_t Probe = Start; Probe + sizeof(void*) <= Block.size(); Probe += sizeof(void*))
+				{
+					uintptr_t Value = PeekPtr(Block, Probe);
+					DecryptChunkFn(static_cast<int32>((Probe - Start) / sizeof(void*)), Value);
+
+					if (!IsReadable(Value))
+						break;
+
+					Run.Count++;
+				}
+
+				const auto Existing = std::find_if(Result.begin(), Result.end(), [&](const FPointerRun& Other)
+				{ return Other.Offset == Run.Offset; });
+
+				if (Existing == Result.end())
+					Result.push_back(Run);
+				else
+					Existing->Count = std::max(Existing->Count, Run.Count);
 			}
 
 			return Result;
@@ -479,6 +546,66 @@ namespace LayoutDetection
 			return Tested > 0 ? static_cast<double>(Valid) / static_cast<double>(Tested) : 0.0;
 		}
 
+		// Same idea as ScoreObjectSamples, but only checks the window right below Num.
+		// NumElements tracks the highest index ever used, not how many objects are still
+		// alive, so a game that streams levels in and out can be mostly empty in the
+		// middle of its range while still dense near the count it actually claims.
+		double ScoreBoundaryDensity(const FItemAddrFn& AddrFn, const FItemLayout& Item, int32 Num, int32 WindowSize, int32 MaxSamples, int32* OutTested, int32* OutValid)
+		{
+			const int32 LowIndex = std::max(0, Num - WindowSize);
+			const int32 Span     = Num - LowIndex;
+			const int32 Step     = std::max(1, Span / std::max(1, MaxSamples));
+
+			int32 Tested = 0;
+			int32 Valid  = 0;
+
+			for (int32 Index = LowIndex; Index < Num && Tested < MaxSamples; Index += Step)
+			{
+				Tested++;
+
+				const uintptr_t ObjAddr = ReadObjectAt(AddrFn(Index, Item.ItemSize), Item);
+				if (!IsLikelyUObject(ObjAddr))
+					continue;
+
+				int32 Reported = 0;
+				if (SafeRead(ObjAddr + Item.IndexOffset, Reported) && Reported == Index)
+					Valid++;
+			}
+
+			if (OutTested)
+				*OutTested = Tested;
+			if (OutValid)
+				*OutValid = Valid;
+
+			return Tested > 0 ? static_cast<double>(Valid) / static_cast<double>(Tested) : 0.0;
+		}
+
+		// Highest index that actually holds a live object, scanned across every readable
+		// chunk. NumElements can't be smaller than this - a candidate below it is simply
+		// wrong, no density check needed. Computed once per Objects pointer and reused for
+		// every count candidate at that pointer.
+		int32 FindObservedMaxValidIndex(const FItemAddrFn& AddrFn, const FItemLayout& Item, int32 CapIndex, int32 MaxSamples)
+		{
+			if (CapIndex <= 0)
+				return -1;
+
+			const int32 Step = std::max(1, CapIndex / std::max(1, MaxSamples));
+
+			int32 MaxValidIndex = -1;
+			for (int32 Index = 0; Index < CapIndex; Index += Step)
+			{
+				const uintptr_t ObjAddr = ReadObjectAt(AddrFn(Index, Item.ItemSize), Item);
+				if (!IsLikelyUObject(ObjAddr))
+					continue;
+
+				int32 Reported = 0;
+				if (SafeRead(ObjAddr + Item.IndexOffset, Reported) && Reported == Index && Index > MaxValidIndex)
+					MaxValidIndex = Index;
+			}
+
+			return MaxValidIndex;
+		}
+
 		/*
 		 * Density below a candidate count proves nothing on its own: every count smaller than
 		 * the real one is also fully populated, which is why an unfiltered scan reports many
@@ -587,7 +714,7 @@ namespace LayoutDetection
 		// DecryptChunkFn is only ever supplied by the names call site: chunk pointers are
 		// never encrypted for GObjects, and passing nullptr here (the objects call site)
 		// keeps this identical to a plain readability probe.
-		int32 CountReadableChunkPointers(uintptr_t ChunksBase, const std::function<void(uintptr_t&)>& DecryptChunkFn = nullptr)
+		int32 CountReadableChunkPointers(uintptr_t ChunksBase, const std::function<void(int32, uintptr_t&)>& DecryptChunkFn = nullptr)
 		{
 			int32 Count = 0;
 			for (int32 i = 0; i < kMaxChunkScan; i++)
@@ -597,7 +724,7 @@ namespace LayoutDetection
 					break;
 
 				if (DecryptChunkFn)
-					DecryptChunkFn(ChunkAddr);
+					DecryptChunkFn(i, ChunkAddr);
 
 				if (!IsReadable(ChunkAddr))
 					break;
@@ -615,7 +742,7 @@ namespace LayoutDetection
 			if (static_cast<int32>(Failures.size()) < kMaxRejectReasons)
 				Failures.push_back(std::move(Reason));
 			else if (static_cast<int32>(Failures.size()) == kMaxRejectReasons)
-				Failures.push_back("  Reject: ... further rejections suppressed");
+				Failures.push_back("Reject: ... further rejections suppressed");
 		}
 
 		// ============================================================================
@@ -678,7 +805,7 @@ namespace LayoutDetection
 				FItemLayout Item;
 				if (!DiscoverItemLayout(ItemsBase, AddrFn, 0, &Item))
 				{
-					Reject(Failures, fmt::format("  EnumerateFixedCandidates: Objects@+0x{:X} -> 0x{:X} - no item stride held across samples", ObjectsOffset, ItemsBase));
+					Reject(Failures, fmt::format("EnumerateFixedCandidates: Objects@+0x{:X} -> 0x{:X} - no item stride held across samples", ObjectsOffset, ItemsBase));
 					continue;
 				}
 
@@ -699,7 +826,7 @@ namespace LayoutDetection
 					const double SampleRatio = ScoreObjectSamples(AddrFn, Item, Num, Options.MaxSamples, &Tested, &Valid);
 					if (SampleRatio < Options.MinimumConfidence)
 					{
-						Reject(Failures, fmt::format("  EnumerateFixedCandidates: Objects@+0x{:X} Num@+0x{:X}={} - only {}/{} samples valid", ObjectsOffset, NumOffset, Num, Valid, Tested));
+						Reject(Failures, fmt::format("EnumerateFixedCandidates: Objects@+0x{:X} Num@+0x{:X}={} - only {}/{} samples valid", ObjectsOffset, NumOffset, Num, Valid, Tested));
 						continue;
 					}
 
@@ -778,7 +905,7 @@ namespace LayoutDetection
 				const int32 ChunkCount = CountReadableChunkPointers(ChunksBase);
 				if (ChunkCount < kMinChunkPtrRun)
 				{
-					Reject(Failures, fmt::format("  EnumerateChunkedCandidates: Objects@+0x{:X} -> 0x{:X} - only {} readable chunk pointers", ObjectsOffset, ChunksBase, ChunkCount));
+					Reject(Failures, fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} -> 0x{:X} - only {} readable chunk pointers", ObjectsOffset, ChunksBase, ChunkCount));
 					continue;
 				}
 
@@ -795,7 +922,7 @@ namespace LayoutDetection
 				FItemLayout Item;
 				if (!DiscoverItemLayout(FirstChunk, ProbeFn, 0, &Item))
 				{
-					Reject(Failures, fmt::format("  EnumerateChunkedCandidates: Objects@+0x{:X} chunk0 0x{:X} - no item stride held across samples", ObjectsOffset, FirstChunk));
+					Reject(Failures, fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} chunk0 0x{:X} - no item stride held across samples", ObjectsOffset, FirstChunk));
 					continue;
 				}
 
@@ -804,7 +931,7 @@ namespace LayoutDetection
 				const int32 ElementsPerChunk = DiscoverElementsPerChunk(ChunksBase, ChunkCount, Item, Header, ObjectsOffset);
 				if (ElementsPerChunk < kMinElementsPerChunk || ElementsPerChunk > kMaxElementsPerChunk)
 				{
-					Reject(Failures, fmt::format("  EnumerateChunkedCandidates: Objects@+0x{:X} - ElementsPerChunk resolved to 0x{:X}, outside [0x{:X}, 0x{:X}]", ObjectsOffset, ElementsPerChunk, kMinElementsPerChunk, kMaxElementsPerChunk));
+					Reject(Failures, fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} - ElementsPerChunk resolved to 0x{:X}, outside [0x{:X}, 0x{:X}]", ObjectsOffset, ElementsPerChunk, kMinElementsPerChunk, kMaxElementsPerChunk));
 					continue;
 				}
 
@@ -812,6 +939,11 @@ namespace LayoutDetection
 				{
 					return GetChunkedItemAddr(ChunksBase, ElementsPerChunk, ItemSize, Index);
 				};
+
+				// A live object past a candidate's count disproves it outright, so check this
+				// once up front instead of per candidate.
+				const int32 CapIndex             = ChunkCount * ElementsPerChunk;
+				const int32 ObservedMaxValidIndex = FindObservedMaxValidIndex(AddrFn, Item, CapIndex, Options.MaxSamples);
 
 				for (int32 NumOffset : IntCandidates)
 				{
@@ -822,11 +954,18 @@ namespace LayoutDetection
 					if (Num < kMinObjectCount || Num > kMaxObjectCount)
 						continue;
 
+					// Something real exists past this count, so it can't be NumElements.
+					if (ObservedMaxValidIndex >= Num)
+					{
+						Reject(Failures, fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} Num@+0x{:X}={} - a valid object was observed at index {}", ObjectsOffset, NumOffset, Num, ObservedMaxValidIndex));
+						continue;
+					}
+
 					// The observed chunk count must be consistent with the claimed element count.
 					const int32 RequiredChunks = ((Num - 1) / ElementsPerChunk) + 1;
 					if (RequiredChunks > ChunkCount)
 					{
-						Reject(Failures, fmt::format("  EnumerateChunkedCandidates: Objects@+0x{:X} Num@+0x{:X}={} - needs {} chunks but only {} are readable", ObjectsOffset, NumOffset, Num, RequiredChunks, ChunkCount));
+						Reject(Failures, fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} Num@+0x{:X}={} - needs {} chunks but only {} are readable", ObjectsOffset, NumOffset, Num, RequiredChunks, ChunkCount));
 						continue;
 					}
 
@@ -834,13 +973,44 @@ namespace LayoutDetection
 					if (ChunkCount < 2 && Num > ElementsPerChunk)
 						continue;
 
-					int32 Tested             = 0;
-					int32 Valid              = 0;
-					const double SampleRatio = ScoreObjectSamples(AddrFn, Item, Num, Options.MaxSamples, &Tested, &Valid);
+					int32 Tested        = 0;
+					int32 Valid         = 0;
+					double SampleRatio  = ScoreObjectSamples(AddrFn, Item, Num, Options.MaxSamples, &Tested, &Valid);
+					bool bUsedFallback  = false;
+
+					// The correct NumElements can still fail this check on a churny target, so
+					// try two cheaper fallbacks before giving up on the candidate.
 					if (SampleRatio < Options.MinimumConfidence)
 					{
-						Reject(Failures, fmt::format("  EnumerateChunkedCandidates: Objects@+0x{:X} Num@+0x{:X}={} - only {}/{} samples valid", ObjectsOffset, NumOffset, Num, Valid, Tested));
-						continue;
+						// Density just below the claimed count - usually still dense there even
+						// when the rest of the range is dead.
+						int32 BoundaryTested        = 0;
+						int32 BoundaryValid         = 0;
+						const double BoundaryRatio = ScoreBoundaryDensity(AddrFn, Item, Num, kBoundaryWindowSize, Options.MaxSamples, &BoundaryTested, &BoundaryValid);
+
+						if (BoundaryRatio >= Options.MinimumConfidence)
+						{
+							bUsedFallback = true;
+							SampleRatio   = BoundaryRatio;
+							Tested        = BoundaryTested;
+							Valid         = BoundaryValid;
+						}
+						else
+						{
+							// How close this count is to the highest live index we already found
+							// above. The real NumElements sits just past it; an unrelated field
+							// that happens to be big enough to dodge that check usually isn't.
+							const double Closeness = ObservedMaxValidIndex >= 0 ? static_cast<double>(ObservedMaxValidIndex) / static_cast<double>(Num) : 0.0;
+
+							if (Closeness < kMinCloseCandidateRatio || Valid < kMinValidSamplesForCloseAccept)
+							{
+								Reject(Failures, fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} Num@+0x{:X}={} - only {}/{} samples valid ({}/{} near the boundary, {:.1f}% close to the observed max {})", ObjectsOffset, NumOffset, Num, Valid, Tested, BoundaryValid, BoundaryTested, Closeness * 100.0, ObservedMaxValidIndex));
+								continue;
+							}
+
+							bUsedFallback = true;
+							SampleRatio   = Closeness;
+						}
 					}
 
 					const double PastRatio = MeasurePastCountPopulation(AddrFn, Item, Num);
@@ -877,7 +1047,7 @@ namespace LayoutDetection
 					Candidate.Confidence    = CombineObjectsScore(SampleRatio, Layout->MaxElements != -1) * (1.0 - kPastCountPenalty * PastRatio);
 					Candidate.SamplesTested = Tested;
 					Candidate.SamplesValid  = Valid;
-					Candidate.Summary       = fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} Num@+0x{:X}={} EPC=0x{:X} stride=0x{:X} objOff=0x{:X} items {}/{} tail {:.0f}%",
+					Candidate.Summary       = fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} Num@+0x{:X}={} EPC=0x{:X} stride=0x{:X} objOff=0x{:X} items {}/{}{} tail {:.0f}%",
 					                                      ObjectsOffset,
 					                                      NumOffset,
 					                                      Num,
@@ -886,6 +1056,7 @@ namespace LayoutDetection
 					                                      Item.ObjectOffset,
 					                                      Valid,
 					                                      Tested,
+					                                      bUsedFallback ? " (fallback)" : "",
 					                                      PastRatio * 100.0);
 					Candidate.Description   = fmt::format("EnumerateChunkedCandidates: Chunked array candidate - {} objects in chunks of {}, {} of {} sampled slots held a valid object",
 					                                      Num,
@@ -990,8 +1161,8 @@ namespace LayoutDetection
 				if (!SafeRead(EntryAddr + Layout.FNameEntry.Header, Header))
 					break;
 
-				const int32 NameLen = Header >> Layout.FNameEntry.LengthShiftCount;
-				const bool bIsWide  = (Header & Layout.FNameEntry.NameWideMask) != 0;
+				const int32 NameLen = Layout.FNameEntry.GetLength(Header);
+				const bool bIsWide  = Layout.FNameEntry.GetIsWide(Header);
 
 				if (NameLen < kMinNameLen || NameLen > kMaxNameLen)
 					break;
@@ -1032,14 +1203,16 @@ namespace LayoutDetection
 		 * Recovers the pool entry header shape without depending on name ordering.
 		 *
 		 * Entry 0 is "None", whose length is exactly 4. That single universal fact pins the
-		 * header: Header >> LengthShiftCount must equal 4. The surviving
+		 * header: GetLength(Header) must equal 4. The surviving
 		 * (Header, Shift, Stride) triples are then disambiguated by walking consecutive
 		 * entries and keeping whichever walks furthest.
 		 *
 		 * The previous implementation instead required the literal "Byte" immediately after
 		 * "None", which fails on any game that reorders or obfuscates names past index 0.
 		 */
-		bool DiscoverPoolEntryLayout(uintptr_t BlockStart, FNamePoolLayout* Out, int32* OutWalkScore)
+		bool DiscoverPoolEntryLayout(uintptr_t BlockStart, FNamePoolLayout* Out, int32* OutWalkScore,
+		                             const std::function<int32(uint16)>& OverrideGetLength = nullptr,
+		                             const std::function<bool(uint16)>&  OverrideGetIsWide = nullptr)
 		{
 			if (!Out)
 				return false;
@@ -1063,6 +1236,8 @@ namespace LayoutDetection
 			int32 BestWalk = 0;
 			bool bFound    = false;
 
+			const std::function<bool(uint16)> DefaultGetIsWide = [](uint16 H) -> bool { return (H & kDefaultNameWideMask) != 0; };
+
 			for (int32 HeaderOffset : HeaderCandidates)
 			{
 				if (HeaderOffset < 0 || HeaderOffset + static_cast<int32>(sizeof(uint16)) > StringOffset)
@@ -1072,19 +1247,20 @@ namespace LayoutDetection
 				if (!SafeRead(Entry0 + HeaderOffset, RawHeader))
 					continue;
 
-				for (int32 Shift = 0; Shift < kMaxLengthShiftCount; Shift++)
+				if (OverrideGetLength)
 				{
-					if ((RawHeader >> Shift) != kNoneStrLen)
+					// Custom extractor: validate against "None" then test all strides.
+					if (OverrideGetLength(RawHeader) != kNoneStrLen)
 						continue;
 
 					for (int32 Stride : kPoolStrides)
 					{
-						FNamePoolLayout Candidate             = *Out;
-						Candidate.FNameEntry.Header           = HeaderOffset;
-						Candidate.FNameEntry.String           = StringOffset;
-						Candidate.FNameEntry.Stride           = Stride;
-						Candidate.FNameEntry.LengthShiftCount = Shift;
-						Candidate.FNameEntry.NameWideMask     = kDefaultNameWideMask;
+						FNamePoolLayout Candidate      = *Out;
+						Candidate.FNameEntry.Header    = HeaderOffset;
+						Candidate.FNameEntry.String    = StringOffset;
+						Candidate.FNameEntry.Stride    = Stride;
+						Candidate.FNameEntry.GetLength = OverrideGetLength;
+						Candidate.FNameEntry.GetIsWide = OverrideGetIsWide ? OverrideGetIsWide : DefaultGetIsWide;
 
 						const int32 Walk = WalkPoolEntries(BlockStart, Candidate, nullptr);
 						if (Walk > BestWalk)
@@ -1092,6 +1268,32 @@ namespace LayoutDetection
 							BestWalk = Walk;
 							Best     = Candidate;
 							bFound   = true;
+						}
+					}
+				}
+				else
+				{
+					for (int32 Shift = 0; Shift < kMaxLengthShiftCount; Shift++)
+					{
+						if ((RawHeader >> Shift) != kNoneStrLen)
+							continue;
+
+						for (int32 Stride : kPoolStrides)
+						{
+							FNamePoolLayout Candidate      = *Out;
+							Candidate.FNameEntry.Header    = HeaderOffset;
+							Candidate.FNameEntry.String    = StringOffset;
+							Candidate.FNameEntry.Stride    = Stride;
+							Candidate.FNameEntry.GetLength = [Shift](uint16 H) -> int32 { return H >> Shift; };
+							Candidate.FNameEntry.GetIsWide = OverrideGetIsWide ? OverrideGetIsWide : DefaultGetIsWide;
+
+							const int32 Walk = WalkPoolEntries(BlockStart, Candidate, nullptr);
+							if (Walk > BestWalk)
+							{
+								BestWalk = Walk;
+								Best     = Candidate;
+								bFound   = true;
+							}
 						}
 					}
 				}
@@ -1152,8 +1354,8 @@ namespace LayoutDetection
 						// need not preserve the difference between two raw pointers.
 						if (NameArray::DecryptNameChunkFn)
 						{
-							NameArray::DecryptNameChunkFn(Current);
-							NameArray::DecryptNameChunkFn(Next);
+							NameArray::DecryptNameChunkFn(i, Current);
+							NameArray::DecryptNameChunkFn(i + 1, Next);
 						}
 
 						const uintptr_t Diff = Next >= Current ? Next - Current : Current - Next;
@@ -1210,7 +1412,7 @@ namespace LayoutDetection
 								continue;
 
 							if (NameArray::DecryptNameChunkFn)
-								NameArray::DecryptNameChunkFn(BlockPtr);
+								NameArray::DecryptNameChunkFn(BlockIdx, BlockPtr);
 
 							if (!IsReadable(BlockPtr))
 								continue;
@@ -1223,7 +1425,7 @@ namespace LayoutDetection
 							if (!SafeRead(EntryAddr + Layout.FNameEntry.Header, Header))
 								continue;
 
-							const int32 NameLen = Header >> Layout.FNameEntry.LengthShiftCount;
+							const int32 NameLen = Layout.FNameEntry.GetLength(Header);
 							if (NameLen < 3 || NameLen > kMaxNameLen)
 								continue;
 
@@ -1345,11 +1547,11 @@ namespace LayoutDetection
 		{
 			bool bAnyBlocks = false;
 
-			for (const FPointerRun& Run : CollectPointerRuns(Header))
+			for (const FPointerRun& Run : CollectPointerRuns(Header, NameArray::DecryptNameChunkFn))
 			{
 				uintptr_t FirstBlock = PeekPtr(Header, static_cast<size_t>(Run.Offset));
 				if (NameArray::DecryptNameChunkFn)
-					NameArray::DecryptNameChunkFn(FirstBlock);
+					NameArray::DecryptNameChunkFn(0, FirstBlock);
 
 				// Entry 0 of the block gets its own, separate entry decryption for this
 				// probe; DiscoverPoolEntryLayout/WalkPoolEntries redo it internally when
@@ -1367,7 +1569,7 @@ namespace LayoutDetection
 				Layout.Blocks = Run.Offset;
 
 				int32 WalkScore = 0;
-				if (!DiscoverPoolEntryLayout(FirstBlock, &Layout, &WalkScore))
+				if (!DiscoverPoolEntryLayout(FirstBlock, &Layout, &WalkScore, Options.PoolGetLength, Options.PoolGetIsWide))
 				{
 					Failures.push_back(fmt::format("EnumeratePoolCandidates: Blocks@+0x{:X} block0 0x{:X} - no (Header, Shift, Stride) triple decoded \"None\"", Run.Offset, FirstBlock));
 					continue;
@@ -1381,7 +1583,7 @@ namespace LayoutDetection
 						break;
 
 					if (NameArray::DecryptNameChunkFn)
-						NameArray::DecryptNameChunkFn(BlockPtr);
+						NameArray::DecryptNameChunkFn(i, BlockPtr);
 
 					if (!IsReadable(BlockPtr))
 						break;
@@ -1462,7 +1664,7 @@ namespace LayoutDetection
 							return {};
 
 						if (NameArray::DecryptNameChunkFn)
-							NameArray::DecryptNameChunkFn(ChunkAddr);
+							NameArray::DecryptNameChunkFn(ChunkIdx, ChunkAddr);
 
 						if (!IsReadable(ChunkAddr))
 							return {};
@@ -1475,8 +1677,8 @@ namespace LayoutDetection
 						if (!SafeRead(EntryAddr + Snapshot.FNameEntry.Header, EntryHeader))
 							return {};
 
-						const int32 NameLen = EntryHeader >> Snapshot.FNameEntry.LengthShiftCount;
-						if ((EntryHeader & Snapshot.FNameEntry.NameWideMask) != 0)
+						const int32 NameLen = Snapshot.FNameEntry.GetLength(EntryHeader);
+						if (Snapshot.FNameEntry.GetIsWide(EntryHeader))
 							return {};
 
 						return ReadDecryptedName(EntryAddr + Snapshot.FNameEntry.String, NameLen);
@@ -1488,13 +1690,12 @@ namespace LayoutDetection
 				Candidate.Confidence    = CombineNamesScore(WalkRatio, KnownHits, CrossRatio, bNoneAtZero);
 				Candidate.SamplesTested = kNameWalkCount;
 				Candidate.SamplesValid  = Decoded;
-				Candidate.Summary       = fmt::format("EnumeratePoolCandidates: Blocks@+0x{:X} blocksBit=0x{:X} hdr=0x{:X} str=0x{:X} stride={} shift={} entries {}/{} known={}",
+				Candidate.Summary       = fmt::format("EnumeratePoolCandidates: Blocks@+0x{:X} blocksBit=0x{:X} hdr=0x{:X} str=0x{:X} stride={} entries {}/{} known={}",
 				                                      Layout.Blocks,
 				                                      Layout.BlocksBit,
 				                                      Layout.FNameEntry.Header,
 				                                      Layout.FNameEntry.String,
 				                                      Layout.FNameEntry.Stride,
-				                                      Layout.FNameEntry.LengthShiftCount,
 				                                      Decoded,
 				                                      kNameWalkCount,
 				                                      KnownHits);
@@ -1535,8 +1736,7 @@ namespace LayoutDetection
 			if (!FindNoneOffset(FirstEntry, &StringOffset))
 				return false;
 
-			Out->FNameEntry.String       = StringOffset;
-			Out->FNameEntry.NameWideMask = kDefaultNameWideMask;
+			Out->FNameEntry.String = StringOffset;
 
 			const int32 MaxIndexScan = std::min(StringOffset + static_cast<int32>(sizeof(int32)), kNoneSearchBytes);
 			for (int32 Offset = 0; Offset + static_cast<int32>(sizeof(uint32)) <= MaxIndexScan; Offset += sizeof(int32))
@@ -1589,7 +1789,7 @@ namespace LayoutDetection
 				return 0;
 
 			if (NameArray::DecryptNameChunkFn)
-				NameArray::DecryptNameChunkFn(SecondChunk);
+				NameArray::DecryptNameChunkFn(1, SecondChunk);
 
 			if (!IsReadable(SecondChunk))
 				return 0;
@@ -1674,7 +1874,7 @@ namespace LayoutDetection
 				// counts here. Whether its text is readable is bonus evidence gathered below.
 				Decoded++;
 
-				if ((IndexField & Layout.FNameEntry.NameWideMask) != 0)
+				if (Layout.FNameEntry.GetIsWide ? Layout.FNameEntry.GetIsWide(IndexField) : (IndexField & 1))
 					continue;
 
 				const std::string Name = ReadDecryptedName(EntryAddr + Layout.FNameEntry.String, kMaxNameLen);
@@ -1722,7 +1922,7 @@ namespace LayoutDetection
 					return 0;
 
 				if (NameArray::DecryptNameChunkFn)
-					NameArray::DecryptNameChunkFn(ChunkAddr);
+					NameArray::DecryptNameChunkFn(ChunkIdx, ChunkAddr);
 
 				if (!IsReadable(ChunkAddr))
 					return 0;
@@ -1800,7 +2000,7 @@ namespace LayoutDetection
 		{
 			bool bAnyChunks = false;
 
-			for (const FPointerRun& Run : CollectPointerRuns(Header))
+			for (const FPointerRun& Run : CollectPointerRuns(Header, NameArray::DecryptNameChunkFn))
 			{
 				const uintptr_t ChunksBase = Root + Run.Offset;
 
@@ -1809,7 +2009,7 @@ namespace LayoutDetection
 					continue;
 
 				if (NameArray::DecryptNameChunkFn)
-					NameArray::DecryptNameChunkFn(FirstChunk);
+					NameArray::DecryptNameChunkFn(0, FirstChunk);
 
 				if (!IsReadable(FirstChunk))
 					continue;
@@ -1844,17 +2044,18 @@ namespace LayoutDetection
 				}
 				Layout.ElementsPerChunk = ElementsPerChunk;
 
+				// Nothing reads this offset - entries are walked until they run out - so a
+				// miss is recorded and the candidate carries on rather than being discarded.
 				Layout.NumElements = DiscoverArrayNumElements(Root, ChunksBase, Layout, ChunkCount);
 				if (Layout.NumElements == -1)
 				{
-					Failures.push_back(fmt::format("EnumerateArrayCandidates: Chunks@+0x{:X} EPC=0x{:X} chunks={} idx=0x{:X} str=0x{:X} - no int32 within 0x{:X} bytes behaved like NumElements",
+					Failures.push_back(fmt::format("EnumerateArrayCandidates: Chunks@+0x{:X} EPC=0x{:X} chunks={} idx=0x{:X} str=0x{:X} - no int32 within 0x{:X} bytes behaved like NumElements (optional, continuing)",
 					                               Run.Offset,
 					                               ElementsPerChunk,
 					                               ChunkCount,
 					                               Layout.FNameEntry.Index,
 					                               Layout.FNameEntry.String,
 					                               kNamesHeaderScanSize));
-					continue;
 				}
 
 				std::vector<std::string> Names;
@@ -1883,7 +2084,7 @@ namespace LayoutDetection
 							return {};
 
 						if (NameArray::DecryptNameChunkFn)
-							NameArray::DecryptNameChunkFn(ChunkAddr);
+							NameArray::DecryptNameChunkFn(ChunkIdx, ChunkAddr);
 
 						if (!IsReadable(ChunkAddr))
 							return {};
@@ -1907,10 +2108,10 @@ namespace LayoutDetection
 				Candidate.Confidence    = CombineNamesScore(WalkRatio, KnownHits, CrossRatio, bNoneAtZero);
 				Candidate.SamplesTested = kNameSampleCount;
 				Candidate.SamplesValid  = Decoded;
-				Candidate.Summary       = fmt::format("EnumerateArrayCandidates: Chunks@+0x{:X} EPC=0x{:X} Num@+0x{:X} idx=0x{:X} str=0x{:X} entries {}/{} known={}",
+				Candidate.Summary       = fmt::format("EnumerateArrayCandidates: Chunks@+0x{:X} EPC=0x{:X} {} idx=0x{:X} str=0x{:X} entries {}/{} known={}",
 				                                      Layout.Chunks,
 				                                      Layout.ElementsPerChunk,
-				                                      Layout.NumElements,
+				                                      Layout.NumElements != -1 ? fmt::format("Num@+0x{:X}", Layout.NumElements) : "Num=none",
 				                                      Layout.FNameEntry.Index,
 				                                      Layout.FNameEntry.String,
 				                                      Decoded,
@@ -2021,7 +2222,7 @@ namespace LayoutDetection
 		Result.bSuccess   = true;
 		Result.Confidence = Best->Confidence;
 		Result.Layout     = std::move(Best->Layout);
-		Result.Details.push_back(fmt::format("  DetectObjectsLayout: Selected: {}, confidence {:.1f}%",
+		Result.Details.push_back(fmt::format("DetectObjectsLayout: Selected: {}, confidence {:.1f}%",
 		                                     Best->Type == EObjectsType::Chunked ? "FChunkedUObjectArray" : "FFixedUObjectArray",
 		                                     Best->Confidence * 100.0));
 		Result.Evidence.push_back(fmt::format("DetectObjectsLayout: Selected the {} object array layout ({:.1f}% confidenc)",
@@ -2125,7 +2326,23 @@ namespace LayoutDetection
 		Result.bSuccess   = true;
 		Result.Confidence = Best->Confidence;
 		Result.Layout     = std::move(Best->Layout);
-		Result.Details.push_back(fmt::format("  DetectNamesLayout: Selected: {}, confidence {:.1f}%",
+
+		if (Result.Layout->GetType() == ENamesType::Pool)
+		{
+			FNamePoolLayout* Pool = static_cast<FNamePoolLayout*>(Result.Layout.get());
+			if (Options.PoolGetLength)
+				Pool->FNameEntry.GetLength = Options.PoolGetLength;
+			if (Options.PoolGetIsWide)
+				Pool->FNameEntry.GetIsWide = Options.PoolGetIsWide;
+		}
+		else
+		{
+			FNameArrayLayout* Arr = static_cast<FNameArrayLayout*>(Result.Layout.get());
+			if (Options.ArrayGetIsWide)
+				Arr->FNameEntry.GetIsWide = Options.ArrayGetIsWide;
+		}
+
+		Result.Details.push_back(fmt::format("DetectNamesLayout: Selected: {}, confidence {:.1f}%",
 		                                     Best->Type == ENamesType::Pool ? "FNamePool" : "TNameArray",
 		                                     Best->Confidence * 100.0));
 		Result.Evidence.push_back(fmt::format("DetectNamesLayout: Selected the {} layout ({:.1f}% confidence)",
@@ -2153,7 +2370,8 @@ namespace LayoutDetection
 
 		FItemLayout Item;
 		FItemAddrFn AddrFn;
-		int32 Num = 0;
+		int32 Num           = 0;
+		int32 ChunkedCapIndex = -1;
 
 		if (Layout->GetType() == EObjectsType::Array)
 		{
@@ -2209,6 +2427,8 @@ namespace LayoutDetection
 			AddrFn                       = [ChunksBase, ElementsPerChunk](int32 Index, int32 ItemSize) -> uintptr_t
 			{ return GetChunkedItemAddr(ChunksBase, ElementsPerChunk, ItemSize, Index); };
 
+			ChunkedCapIndex = CountReadableChunkPointers(ChunksBase) * ElementsPerChunk;
+
 			Result.Details.push_back(fmt::format("TestObjectsLayout: Chunked, Objects=0x{:X} Num={} EPC=0x{:X} stride=0x{:X}", L.Objects, Num, ElementsPerChunk, L.FUObjectItem.Size));
 			Result.Evidence.push_back(fmt::format("TestObjectsLayout: Verifying the chunked object array layout at 0x{:X} ({} objects in chunks of {})", CandidateAddress, Num, ElementsPerChunk));
 		}
@@ -2223,7 +2443,33 @@ namespace LayoutDetection
 		}
 
 		const int32 SampleBudget = std::min(Options.MaxSamples, kTestSampleCount);
-		const double Ratio       = ScoreObjectSamples(AddrFn, Item, Num, SampleBudget, &Result.SamplesTested, &Result.SamplesValid);
+		double Ratio             = ScoreObjectSamples(AddrFn, Item, Num, SampleBudget, &Result.SamplesTested, &Result.SamplesValid);
+
+		// Same fallback as EnumerateChunkedCandidates, since this can be the exact layout
+		// that just passed there. Use the bigger Options.MaxSamples budget here, not the
+		// fast path's smaller SampleBudget - with too few samples on a sparse target, the
+		// fallback can flip a real pass back into a fail.
+		if (Ratio < kTestMinValidRatio && ChunkedCapIndex > 0)
+		{
+			int32 BoundaryTested       = 0;
+			int32 BoundaryValid        = 0;
+			const double BoundaryRatio = ScoreBoundaryDensity(AddrFn, Item, Num, kBoundaryWindowSize, Options.MaxSamples, &BoundaryTested, &BoundaryValid);
+
+			if (BoundaryRatio >= kTestMinValidRatio)
+			{
+				Ratio                = BoundaryRatio;
+				Result.SamplesTested = BoundaryTested;
+				Result.SamplesValid  = BoundaryValid;
+			}
+			else
+			{
+				const int32 ObservedMaxValidIndex = FindObservedMaxValidIndex(AddrFn, Item, ChunkedCapIndex, Options.MaxSamples);
+				const double Closeness            = ObservedMaxValidIndex >= 0 ? static_cast<double>(ObservedMaxValidIndex) / static_cast<double>(Num) : 0.0;
+
+				if (Closeness >= kMinCloseCandidateRatio && Result.SamplesValid >= kMinValidSamplesForCloseAccept)
+					Ratio = Closeness;
+			}
+		}
 
 		Result.Confidence = Ratio;
 		Result.bValid     = Ratio >= kTestMinValidRatio;
@@ -2272,7 +2518,7 @@ namespace LayoutDetection
 			}
 
 			if (NameArray::DecryptNameChunkFn)
-				NameArray::DecryptNameChunkFn(FirstBlock);
+				NameArray::DecryptNameChunkFn(0, FirstBlock);
 
 			if (!IsReadable(FirstBlock))
 			{
@@ -2301,13 +2547,12 @@ namespace LayoutDetection
 			Result.SamplesValid  = std::min(WalkPoolEntries(FirstBlock, L, &Names), kTestSampleCount);
 
 			Result.Evidence.push_back(fmt::format("TestNamesLayout: Verifying the name pool layout at 0x{:X}.", CandidateAddress));
-			Result.Details.push_back(fmt::format("TestNamesLayout: Pool, Blocks=0x{:X} blocksBit=0x{:X} hdr=0x{:X} str=0x{:X} stride={} shift={}",
+			Result.Details.push_back(fmt::format("TestNamesLayout: Pool, Blocks=0x{:X} blocksBit=0x{:X} hdr=0x{:X} str=0x{:X} stride={}",
 			                                     L.Blocks,
 			                                     L.BlocksBit,
 			                                     L.FNameEntry.Header,
 			                                     L.FNameEntry.String,
-			                                     L.FNameEntry.Stride,
-			                                     L.FNameEntry.LengthShiftCount));
+			                                     L.FNameEntry.Stride));
 		}
 		else
 		{
@@ -2321,7 +2566,7 @@ namespace LayoutDetection
 			}
 
 			if (NameArray::DecryptNameChunkFn)
-				NameArray::DecryptNameChunkFn(FirstChunk);
+				NameArray::DecryptNameChunkFn(0, FirstChunk);
 
 			if (!IsReadable(FirstChunk))
 			{
@@ -2377,7 +2622,7 @@ namespace LayoutDetection
 					const uintptr_t ChunkSlot = CandidateAddress + L.Chunks + static_cast<uintptr_t>(i) * kPtrSize;
 					SafeRead(ChunkSlot, ChunkAddr);
 					if (NameArray::DecryptNameChunkFn)
-						NameArray::DecryptNameChunkFn(ChunkAddr);
+						NameArray::DecryptNameChunkFn(i, ChunkAddr);
 					Result.Details.push_back(fmt::format("TestNamesLayout:   Chunk[{}] 0x{:X} -> 0x{:X}", i, ChunkSlot, ChunkAddr));
 				}
 			}

@@ -145,26 +145,25 @@ bool Generator::InitObjects(std::string& OutErrorString)
 			Address = DecAddress;
 		}
 
-		if (TryGObjectsAt(Address, "Direct"))
+		GObjects = Address;
+		if (TryGObjectsAt(GObjects, "Direct"))
 		{
-			GObjects                       = Address;
 			GInSDKOffsets.Statics.GObjects = ObjectsOffset;
 			GLogger.FmtWrite(ELogLevel::Info, "InitObjects: GObjects accepted at 0x{:X} (Direct)\n", GObjects);
 			return true;
 		}
 
-		const uintptr_t CandidateDeref = GMemory->Read<uintptr_t>(Address);
-		if (!GMemory->IsAddressReadable(CandidateDeref))
+		GObjects = GMemory->Read<uintptr_t>(GObjects);
+		if (!GMemory->IsAddressReadable(GObjects))
 		{
 			GLogger.FmtWrite(ELogLevel::Info, "InitObjects: [Dereference] Skipped - 0x{:X} does not hold a readable pointer.\n", Address);
 			return false;
 		}
 
-		GLogger.FmtWrite(ELogLevel::Info, "InitObjects: Dereferencing 0x{:X} -> 0x{:X}\n", Address, CandidateDeref);
+		GLogger.FmtWrite(ELogLevel::Info, "InitObjects: Dereferencing 0x{:X} -> 0x{:X}\n", Address, GObjects);
 
-		if (TryGObjectsAt(CandidateDeref, "Dereference"))
+		if (TryGObjectsAt(GObjects, "Dereference"))
 		{
-			GObjects                       = CandidateDeref;
 			GInSDKOffsets.Statics.GObjects = ObjectsOffset;
 			GLogger.FmtWrite(ELogLevel::Info, "InitObjects: GObjects accepted at 0x{:X} (Dereference of 0x{:X})\n", GObjects, Address);
 			return true;
@@ -179,11 +178,13 @@ bool Generator::InitObjects(std::string& OutErrorString)
 
 	if (GMemory->IsAddressReadable(GObjects))
 	{
+		GLogger.FmtWrite(ELogLevel::Info, "InitObjects: IProfile::GetGObjects() returned valid address (0x{:X})\n", GObjects);
+
 		bSuccess = InitGObjectsVars(GObjects, "User Profile", 1.00f);
 	}
 	else
 	{
-		GLogger.FmtWrite(ELogLevel::Warning, "InitObjects: IProfile::GetGObjects() returned 0, falling back to UEAnalyzerKitty...\n");
+		GLogger.FmtWrite(ELogLevel::Warning, "InitObjects: IProfile::GetGObjects() returned invalid address (0x{:X}), falling back to UEAnalyzerKitty...\n", GObjects);
 
 		auto Result = Generator::Analyzer.Find(UEAnalyzerKitty::Targets::GUObjectArray);
 		if (Result.Candidates.empty())
@@ -229,6 +230,11 @@ bool Generator::InitObjects(std::string& OutErrorString)
 		GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::ElementsPerChunk: 0x{:X}\n", (uint32_t)L->ElementsPerChunk);
 		GLogger.FmtWrite(ELogLevel::Info, "FUObjectItem::Object: 0x{:X}\n", (uint32_t)L->FUObjectItem.Object);
 		GLogger.FmtWrite(ELogLevel::Info, "FUObjectItem::Size: 0x{:X}\n", (uint32_t)L->FUObjectItem.Size);
+
+		/*for (int i = 0; i < 0x40; i += 4)
+		{
+		    GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray[0x{:X}] = 0x{:X}\n", i, GMemory->Read<int32>(GObjects + i));
+		}*/
 	}
 	else
 	{
@@ -267,14 +273,14 @@ bool Generator::InitNames(std::string& OutErrorString)
 		GProfile->DecryptUTF32(Data, Len);
 	});
 
-	NameArray::SetDecryptNameChunkFn([](uintptr_t& ChunkAddr)
+	NameArray::SetDecryptNameChunkFn([](int32 ChunkIdx, uintptr_t& ChunkAddr)
 	{
-		GProfile->DecryptNameChunk(GNames, GLayouts.NamesLayout, ChunkAddr);
+		GProfile->DecryptNameChunk(GNames, ChunkIdx, ChunkAddr);
 	});
 
 	NameArray::SetDecryptNameEntryFn([](uintptr_t& NameEntry)
 	{
-		GProfile->DecryptNameEntry(GNames, GLayouts.NamesLayout, NameEntry);
+		GProfile->DecryptNameEntry(GNames, NameEntry);
 	});
 
 	// Resolves and then independently validates one interpretation of a candidate.
@@ -329,26 +335,25 @@ bool Generator::InitNames(std::string& OutErrorString)
 			Address = DecAddress;
 		}
 
-		if (TryGNamesAt(Address, "Direct"))
+		GNames = Address;
+		if (TryGNamesAt(GNames, "Direct"))
 		{
-			GNames                       = Address;
 			GInSDKOffsets.Statics.GNames = NamesOffset;
 			GLogger.FmtWrite(ELogLevel::Info, "InitNames: GNames accepted at 0x{:X} (Direct)\n", GNames);
 			return true;
 		}
 
-		const uintptr_t CandidateDeref = GMemory->Read<uintptr_t>(Address);
-		if (!GMemory->IsAddressReadable(CandidateDeref))
+		GNames = GMemory->Read<uintptr_t>(GNames);
+		if (!GMemory->IsAddressReadable(GNames))
 		{
 			GLogger.FmtWrite(ELogLevel::Info, "InitNames: [Dereference] Skipped - 0x{:X} does not hold a readable pointer.\n", Address);
 			return false;
 		}
 
-		GLogger.FmtWrite(ELogLevel::Info, "InitNames: Dereferencing 0x{:X} -> 0x{:X}\n", Address, CandidateDeref);
+		GLogger.FmtWrite(ELogLevel::Info, "InitNames: Dereferencing 0x{:X} -> 0x{:X}\n", Address, GNames);
 
-		if (TryGNamesAt(CandidateDeref, "Dereference"))
+		if (TryGNamesAt(GNames, "Dereference"))
 		{
-			GNames                       = CandidateDeref;
 			GInSDKOffsets.Statics.GNames = NamesOffset;
 			GLogger.FmtWrite(ELogLevel::Info, "InitNames: GNames accepted at 0x{:X} (Dereference of 0x{:X})\n", GNames, Address);
 			return true;
@@ -363,11 +368,13 @@ bool Generator::InitNames(std::string& OutErrorString)
 
 	if (GMemory->IsAddressReadable(GNames))
 	{
+		GLogger.FmtWrite(ELogLevel::Info, "InitNames: IProfile::GetGNames() returned valid address (0x{:X})\n", GNames);
+
 		bSuccess = InitGNamesVars(GNames, "User Profile", 1.00f);
 	}
 	else
 	{
-		GLogger.FmtWrite(ELogLevel::Warning, "InitNames: IProfile::GetGNames() returned 0, falling back to UEAnalyzerKitty...\n");
+		GLogger.FmtWrite(ELogLevel::Warning, "InitNames: IProfile::GetGNames() returned invalid address (0x{:X}), falling back to UEAnalyzerKitty...\n", GNames);
 
 		auto Result = Generator::Analyzer.Find(UEAnalyzerKitty::Targets::Names);
 
@@ -410,8 +417,6 @@ bool Generator::InitNames(std::string& OutErrorString)
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::Stride: 0x{:X}\n", (uint32_t)L->FNameEntry.Stride);
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::Header: 0x{:X}\n", (uint32_t)L->FNameEntry.Header);
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::String: 0x{:X}\n", (uint32_t)L->FNameEntry.String);
-		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::NameWideMask: 0x{:X}\n", (uint32_t)L->FNameEntry.NameWideMask);
-		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::LengthShiftCount: 0x{:X}\n", (uint32_t)L->FNameEntry.LengthShiftCount);
 	}
 	else
 	{

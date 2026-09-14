@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -52,18 +53,19 @@ struct FNameArrayLayout : public INamesLayout
 	int32 Chunks;
 	/// @brief Entries per chunk. A count, not an offset.
 	int32 ElementsPerChunk;
-	/// @brief Offset of the live entry count.
+	/// @brief Offset of the live entry count, or -1 when it could not be located.
 	int32 NumElements;
 
 	/// @brief Offsets within a single FNameEntry.
 	struct
 	{
-		/// @brief Bit of Index that marks a wide (UTF-16) name.
-		int32 NameWideMask;
 		/// @brief Offset of the character data.
 		int32 String;
 		/// @brief Offset of the packed `(Index << 1) | bIsWide` field.
 		int32 Index;
+
+		/// @brief Returns true when the raw packed index field indicates a UTF-16 name.
+		std::function<bool(int32)> GetIsWide;
 
 		/// @brief True when every required entry offset has been resolved.
 		inline bool IsValid() const { return Index != -1 && String != -1; }
@@ -73,11 +75,11 @@ struct FNameArrayLayout : public INamesLayout
 	    : Chunks(0x0),
 	      ElementsPerChunk(0x4000),
 	      NumElements(-1),
-	      FNameEntry({0x1, -1, -1})
+	      FNameEntry({-1, -1})
 	{
 	}
 
-	inline bool IsValid() const override { return Chunks != -1 && ElementsPerChunk > 0 && NumElements != -1 && FNameEntry.IsValid(); }
+	inline bool IsValid() const override { return Chunks != -1 && ElementsPerChunk > 0 && FNameEntry.IsValid(); }
 
 	inline ENamesType GetType() const override { return ENamesType::Array; }
 };
@@ -103,10 +105,6 @@ struct FNamePoolLayout : public INamesLayout
 	/// @brief Offsets within a single packed FNameEntry.
 	struct
 	{
-		/// @brief Bit of Header that marks a wide (UTF-16) name.
-		int32 NameWideMask;
-		/// @brief Right shift applied to Header to recover the name length.
-		int32 LengthShiftCount;
 		/// @brief Alignment that entry advances are rounded up to.
 		int32 Stride;
 		/// @brief Offset of the uint16 header holding length and flags.
@@ -114,8 +112,13 @@ struct FNamePoolLayout : public INamesLayout
 		/// @brief Offset of the character data.
 		int32 String;
 
+		/// @brief Returns true when the raw FNameEntry header indicates a UTF-16 name.
+		std::function<bool(uint16)> GetIsWide;
+		/// @brief Extracts the name length from a raw FNameEntry header.
+		std::function<int32(uint16)> GetLength;
+
 		/// @brief True when every required entry offset has been resolved.
-		inline bool IsValid() const { return NameWideMask != -1 && LengthShiftCount != -1 && Stride != -1 && Header != -1 && String != -1; }
+		inline bool IsValid() const { return Stride != -1 && Header != -1 && String != -1 && GetIsWide && GetLength; }
 	} FNameEntry;
 
 	FNamePoolLayout()
@@ -123,7 +126,7 @@ struct FNamePoolLayout : public INamesLayout
 	      MaxChunkIndex(-1),
 	      ByteCursor(-1),
 	      Blocks(-1),
-	      FNameEntry({0x1, -1, -1, -1, -1})
+	      FNameEntry({-1, -1, -1, nullptr, nullptr})
 	{
 	}
 
@@ -362,6 +365,14 @@ namespace LayoutDetection
 	inline constexpr int32 kPastProbeStep = 64;
 	/// @brief Confidence penalty applied in proportion to a populated tail.
 	inline constexpr double kPastCountPenalty = 0.55;
+	/// @brief Size of the window below a candidate count used for boundary density.
+	inline constexpr int32 kBoundaryWindowSize = 0x400;
+	/// @brief How close, as a fraction, a candidate count must sit to the highest live
+	///        index we've actually seen for it to be accepted as NumElements.
+	inline constexpr double kMinCloseCandidateRatio = 0.90;
+	/// @brief Minimum valid samples (a count, not a ratio) to accept a candidate through
+	///        the closeness fallback, so a near-miss with barely any evidence still fails.
+	inline constexpr int32 kMinValidSamplesForCloseAccept = 10;
 
 	// ---- Names: structure bounds ----
 
@@ -506,6 +517,19 @@ namespace LayoutDetection
 		/// @brief Decode sampled UObject FNames through a names candidate. Skipped when
 		///        ObjectArray is not yet initialized, keeping names detection standalone.
 		bool bEnableCrossValidation = true;
+
+		/// @brief Overrides the FNameEntry length extraction for FNamePool layouts.
+		/// When set, takes precedence over the default shift-based extraction found during detection.
+		/// Structural detection (stride, header offset, etc.) still runs normally.
+		std::function<int32(uint16)> PoolGetLength;
+		/// @brief Overrides the FNameEntry wide-flag extraction for FNamePool layouts.
+		/// When set, takes precedence over the default mask-based extraction found during detection.
+		/// Structural detection (stride, header offset, etc.) still runs normally.
+		std::function<bool(uint16)> PoolGetIsWide;
+		/// @brief Overrides the FNameEntry wide-flag extraction for FNameArray layouts.
+		/// When set, takes precedence over the default `NameIdx & 1` extraction.
+		/// Structural detection still runs normally.
+		std::function<bool(int32)> ArrayGetIsWide;
 	};
 
 	/**
