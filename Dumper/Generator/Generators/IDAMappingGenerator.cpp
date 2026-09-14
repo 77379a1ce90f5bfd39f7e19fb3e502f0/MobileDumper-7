@@ -472,30 +472,30 @@ uint32 IDAMappingGenerator::GeneratePredefinedTypes(std::stringstream& StructDat
 	{
 		PredefinedStruct& T = AddPredef("TArray", sizeof(TArray<int>), alignof(TArray<int>));
 		T.Properties        = {
-		    IDA_MEMBER_AT("void*", "Data", 0, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("int32", "NumElements", PtrSize, sizeof(int32), alignof(int32)),
-		    IDA_MEMBER_AT("int32", "MaxElements", PtrSize + (int32)sizeof(int32), sizeof(int32), alignof(int32)),
-		};
+            IDA_MEMBER_AT("void*", "Data", 0, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("int32", "NumElements", PtrSize, sizeof(int32), alignof(int32)),
+            IDA_MEMBER_AT("int32", "MaxElements", PtrSize + (int32)sizeof(int32), sizeof(int32), alignof(int32)),
+        };
 	}
 
 	// FString = TArray<wchar_t>
 	{
 		PredefinedStruct& T = AddPredef("FString", sizeof(TArray<int>), alignof(TArray<int>));
 		T.Properties        = {
-		    IDA_MEMBER_AT("wchar_t*", "Data", 0, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("int32", "NumElements", PtrSize, sizeof(int32), alignof(int32)),
-		    IDA_MEMBER_AT("int32", "MaxElements", PtrSize + (int32)sizeof(int32), sizeof(int32), alignof(int32)),
-		};
+            IDA_MEMBER_AT("wchar_t*", "Data", 0, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("int32", "NumElements", PtrSize, sizeof(int32), alignof(int32)),
+            IDA_MEMBER_AT("int32", "MaxElements", PtrSize + (int32)sizeof(int32), sizeof(int32), alignof(int32)),
+        };
 	}
 
 	// FUtf8String = TArray<char>
 	{
 		PredefinedStruct& T = AddPredef("FUtf8String", sizeof(TArray<int>), alignof(TArray<int>));
 		T.Properties        = {
-		    IDA_MEMBER_AT("char*", "Data", 0, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("int32", "NumElements", PtrSize, sizeof(int32), alignof(int32)),
-		    IDA_MEMBER_AT("int32", "MaxElements", PtrSize + (int32)sizeof(int32), sizeof(int32), alignof(int32)),
-		};
+            IDA_MEMBER_AT("char*", "Data", 0, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("int32", "NumElements", PtrSize, sizeof(int32), alignof(int32)),
+            IDA_MEMBER_AT("int32", "MaxElements", PtrSize + (int32)sizeof(int32), sizeof(int32), alignof(int32)),
+        };
 	}
 
 	// FName: layout depends on FNameSize (runtime)
@@ -514,46 +514,46 @@ uint32 IDAMappingGenerator::GeneratePredefinedTypes(std::stringstream& StructDat
 	{
 		PredefinedStruct& T = AddPredef("TWeakObjectPtr", FWeakObjectPtrSize, alignof(int32));
 		T.Properties        = {
-		    IDA_MEMBER_AT("int32", "ObjectIndex", 0, sizeof(int32), alignof(int32)),
-		    IDA_MEMBER_AT("int32", "ObjectSerialNumber", sizeof(int32), sizeof(int32), alignof(int32)),
-		};
+            IDA_MEMBER_AT("int32", "ObjectIndex", 0, sizeof(int32), alignof(int32)),
+            IDA_MEMBER_AT("int32", "ObjectSerialNumber", sizeof(int32), sizeof(int32), alignof(int32)),
+        };
 	}
 
 	// FScriptDelegate: { FWeakObjectPtr Object; FName FunctionName; } runtime FNameSize
 	{
 		PredefinedStruct& T = AddPredef("FScriptDelegate", GInSDKOffsets.DelegateProperty.SizeOf, alignof(int32));
 		T.Properties        = {
-		    IDA_MEMBER_AT("struct TWeakObjectPtr", "Object", 0, FWeakObjectPtrSize, alignof(int32)),
-		    IDA_MEMBER_AT("struct FName", "FunctionName", FWeakObjectPtrSize, FNameSize, alignof(int32)),
-		};
+            IDA_MEMBER_AT("struct TWeakObjectPtr", "Object", 0, FWeakObjectPtrSize, alignof(int32)),
+            IDA_MEMBER_AT("struct FName", "FunctionName", FWeakObjectPtrSize, FNameSize, alignof(int32)),
+        };
 	}
 
 	// FMulticastInlineDelegate: { TArray<FScriptDelegate> InvocationList; }
 	{
 		PredefinedStruct& T = AddPredef("FMulticastInlineDelegate", GInSDKOffsets.MulticastInlineDelegateProperty.SizeOf, alignof(TArray<int>));
 		T.Properties        = {
-		    IDA_MEMBER_AT("struct TArray", "InvocationList", 0, sizeof(TArray<int>), alignof(TArray<int>)),
-		};
+            IDA_MEMBER_AT("struct TArray", "InvocationList", 0, sizeof(TArray<int>), alignof(TArray<int>)),
+        };
 	}
 
 	// TScriptInterface: { UObject* ObjectPointer; void* InterfacePointer; }
 	{
 		PredefinedStruct& T = AddPredef("TScriptInterface", PtrSize * 2, alignof(void*));
 		T.Properties        = {
-		    IDA_MEMBER_AT("void*", "ObjectPointer", 0, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("void*", "InterfacePointer", PtrSize, PtrSize, alignof(void*)),
-		};
+            IDA_MEMBER_AT("void*", "ObjectPointer", 0, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("void*", "InterfacePointer", PtrSize, PtrSize, alignof(void*)),
+        };
 	}
 
 	// FGuid: { uint32 A, B, C, D; }
 	{
 		PredefinedStruct& T = AddPredef("FGuid", static_cast<int32>(sizeof(uint32) * 4), alignof(uint32));
 		T.Properties        = {
-		    IDA_MEMBER_AT("uint32", "A", sizeof(uint32) * 0, sizeof(uint32), alignof(uint32)),
-		    IDA_MEMBER_AT("uint32", "B", sizeof(uint32) * 1, sizeof(uint32), alignof(uint32)),
-		    IDA_MEMBER_AT("uint32", "C", sizeof(uint32) * 2, sizeof(uint32), alignof(uint32)),
-		    IDA_MEMBER_AT("uint32", "D", sizeof(uint32) * 3, sizeof(uint32), alignof(uint32)),
-		};
+            IDA_MEMBER_AT("uint32", "A", sizeof(uint32) * 0, sizeof(uint32), alignof(uint32)),
+            IDA_MEMBER_AT("uint32", "B", sizeof(uint32) * 1, sizeof(uint32), alignof(uint32)),
+            IDA_MEMBER_AT("uint32", "C", sizeof(uint32) * 2, sizeof(uint32), alignof(uint32)),
+            IDA_MEMBER_AT("uint32", "D", sizeof(uint32) * 3, sizeof(uint32), alignof(uint32)),
+        };
 	}
 
 	// TMap and TSet are emitted as opaque blobs of the correct size and alignment
@@ -565,10 +565,10 @@ uint32 IDAMappingGenerator::GeneratePredefinedTypes(std::stringstream& StructDat
 	{
 		PredefinedStruct& T = AddPredef("TFieldPath", GInSDKOffsets.FieldPathProperty.SizeOf, alignof(void*));
 		T.Properties        = {
-		    IDA_MEMBER_AT("struct FField*", "ResolvedField", 0, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("struct TWeakObjectPtr", "ResolvedOwner", PtrSize, FWeakObjectPtrSize, alignof(int32)),
-		    IDA_MEMBER_AT("struct TArray", "Path", PtrSize + FWeakObjectPtrSize, sizeof(TArray<int>), alignof(TArray<int>)),
-		};
+            IDA_MEMBER_AT("struct FField*", "ResolvedField", 0, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("struct TWeakObjectPtr", "ResolvedOwner", PtrSize, FWeakObjectPtrSize, alignof(int32)),
+            IDA_MEMBER_AT("struct TArray", "Path", PtrSize + FWeakObjectPtrSize, sizeof(TArray<int>), alignof(TArray<int>)),
+        };
 	}
 
 	// TUObjectArray: chunked vs fixed layout
@@ -581,18 +581,18 @@ uint32 IDAMappingGenerator::GeneratePredefinedTypes(std::stringstream& StructDat
 		{
 			PredefinedStruct& T = AddPredef("FUObjectItem", Layout->FUObjectItem.Size, PtrSize);
 			T.Properties        = {
-			    IDA_MEMBER_AT("void*", "Object", Layout->FUObjectItem.Object, PtrSize, alignof(void*)),
-			};
+                IDA_MEMBER_AT("void*", "Object", Layout->FUObjectItem.Object, PtrSize, alignof(void*)),
+            };
 		}
 
 		PredefinedStruct& T = AddPredef("TUObjectArray", ObjectArraySize, PtrSize);
 		T.Properties        = {
-		    IDA_MEMBER_AT("struct FUObjectItem**", "Objects", Layout->Objects, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("int32", "MaxElements", Layout->MaxElements, sizeof(int32), alignof(int32)),
-		    IDA_MEMBER_AT("int32", "NumElements", Layout->NumElements, sizeof(int32), alignof(int32)),
-		    IDA_MEMBER_AT("int32", "MaxChunks", Layout->MaxChunks, sizeof(int32), alignof(int32)),
-		    IDA_MEMBER_AT("int32", "NumChunks", Layout->NumChunks, sizeof(int32), alignof(int32)),
-		};
+            IDA_MEMBER_AT("struct FUObjectItem**", "Objects", Layout->Objects, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("int32", "MaxElements", Layout->MaxElements, sizeof(int32), alignof(int32)),
+            IDA_MEMBER_AT("int32", "NumElements", Layout->NumElements, sizeof(int32), alignof(int32)),
+            IDA_MEMBER_AT("int32", "MaxChunks", Layout->MaxChunks, sizeof(int32), alignof(int32)),
+            IDA_MEMBER_AT("int32", "NumChunks", Layout->NumChunks, sizeof(int32), alignof(int32)),
+        };
 	}
 	else
 	{
@@ -603,16 +603,16 @@ uint32 IDAMappingGenerator::GeneratePredefinedTypes(std::stringstream& StructDat
 		{
 			PredefinedStruct& T = AddPredef("FUObjectItem", Layout->FUObjectItem.Size, PtrSize);
 			T.Properties        = {
-			    IDA_MEMBER_AT("void*", "Object", Layout->FUObjectItem.Object, PtrSize, alignof(void*)),
-			};
+                IDA_MEMBER_AT("void*", "Object", Layout->FUObjectItem.Object, PtrSize, alignof(void*)),
+            };
 		}
 
 		PredefinedStruct& T = AddPredef("TUObjectArray", ObjectArraySize, PtrSize);
 		T.Properties        = {
-		    IDA_MEMBER_AT("struct FUObjectItem*", "Objects", Layout->Objects, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("int32", "MaxElements", Layout->MaxObjects, sizeof(int32), alignof(int32)),
-		    IDA_MEMBER_AT("int32", "NumElements", Layout->NumObjects, sizeof(int32), alignof(int32)),
-		};
+            IDA_MEMBER_AT("struct FUObjectItem*", "Objects", Layout->Objects, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("int32", "MaxElements", Layout->MaxObjects, sizeof(int32), alignof(int32)),
+            IDA_MEMBER_AT("int32", "NumElements", Layout->NumObjects, sizeof(int32), alignof(int32)),
+        };
 	}
 
 	// TNameEntryArray: only when not using FNamePool
@@ -626,9 +626,11 @@ uint32 IDAMappingGenerator::GeneratePredefinedTypes(std::stringstream& StructDat
 
 		PredefinedStruct& T = AddPredef("TNameEntryArray", NameArraySize, PtrSize);
 		T.Properties        = {
-		    IDA_MEMBER_AT("void*", "Chunks", Layout->Chunks, ChunkTableSizeBytes, alignof(void*)),
-		    IDA_MEMBER_AT("int32", "NumElements", Layout->NumElements, sizeof(int32), alignof(int32)),
-		};
+            IDA_MEMBER_AT("void*", "Chunks", Layout->Chunks, ChunkTableSizeBytes, alignof(void*)),
+        };
+
+		if (Layout->NumElements != -1)
+			T.Properties.push_back(IDA_MEMBER_AT("int32", "NumElements", Layout->NumElements, sizeof(int32), alignof(int32)));
 	}
 
 	// FStructBaseChain: void** (1 ptr) + int32 slot (uint32 + trailing pad)
@@ -636,9 +638,9 @@ uint32 IDAMappingGenerator::GeneratePredefinedTypes(std::stringstream& StructDat
 	{
 		PredefinedStruct& T = AddPredef("FStructBaseChain", PtrSize * 2, alignof(void*));
 		T.Properties        = {
-		    IDA_MEMBER_AT("void**", "StructBaseChainArray", 0, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("int32", "NumStructBasesInChainMinusOne", PtrSize, sizeof(int32), alignof(int32)),
-		};
+            IDA_MEMBER_AT("void**", "StructBaseChainArray", 0, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("int32", "NumStructBasesInChainMinusOne", PtrSize, sizeof(int32), alignof(int32)),
+        };
 	}
 
 	// FField: { void* VTable; FFieldClass* ClassPrivate; FFieldVariant Owner; FField* Next; FName Name; int32 ObjFlags; }
@@ -646,13 +648,13 @@ uint32 IDAMappingGenerator::GeneratePredefinedTypes(std::stringstream& StructDat
 	{
 		PredefinedStruct& T = AddPredef("FField", PtrSize * 4 + FNameSize + (int32)sizeof(int32), PtrSize);
 		T.Properties        = {
-		    IDA_MEMBER_AT("void*", "VTable", 0, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("void*", "ClassPrivate", PtrSize, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("void*", "Owner", PtrSize * 2, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("struct FField*", "Next", PtrSize * 3, PtrSize, alignof(void*)),
-		    IDA_MEMBER_AT("struct FName", "Name", PtrSize * 4, FNameSize, alignof(int32)),
-		    IDA_MEMBER_AT("int32", "ObjFlags", PtrSize * 4 + FNameSize, sizeof(int32), alignof(int32)),
-		};
+            IDA_MEMBER_AT("void*", "VTable", 0, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("void*", "ClassPrivate", PtrSize, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("void*", "Owner", PtrSize * 2, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("struct FField*", "Next", PtrSize * 3, PtrSize, alignof(void*)),
+            IDA_MEMBER_AT("struct FName", "Name", PtrSize * 4, FNameSize, alignof(int32)),
+            IDA_MEMBER_AT("int32", "ObjFlags", PtrSize * 4 + FNameSize, sizeof(int32), alignof(int32)),
+        };
 	}
 
 	// FText
@@ -808,7 +810,7 @@ void IDAMappingGenerator::GenerateClassFunctions(std::stringstream& ExecFuncData
 			continue;
 
 		IDAMappingsLayouts::ExecFunc ExecFunc;
-		ExecFunc.MangledName               = AddNameToData(NameData, MangledName);
+		ExecFunc.MangledName = AddNameToData(NameData, MangledName);
 		// Func.GetExecFunction() is the address of UHT's native "execFoo" thunk, not
 		// a separate "Foo" symbol, so the readable name applied to it must match.
 		ExecFunc.UnmangledName             = AddNameToData(NameData, CppGeneratorAccessor::GetStructPrefixedName(WrappedClass) + "::exec" + WrappedFunc.GetName());
