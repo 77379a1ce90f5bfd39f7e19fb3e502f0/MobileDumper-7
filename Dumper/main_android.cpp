@@ -147,9 +147,10 @@ DumpLabel:
 		if (bSuspend && GamePid != getpid())
 			Suspension.emplace(GamePid);
 
-		bool isLocal64bit  = !KittyMemoryEx::getMaps(getpid(), EProcMapFilter::Contains, "/lib64/").empty();
-		bool isRemote64bit = !KittyMemoryEx::getMaps(GamePid, EProcMapFilter::Contains, "/lib64/").empty();
-		bIsBitOk           = isLocal64bit == isRemote64bit;
+		bool bIsLocal64bit  = !KittyMemoryEx::getMaps(getpid(), EProcMapFilter::Contains, "/lib64/").empty();
+		bool bIsRemote64bit = !KittyMemoryEx::getMaps(GamePid, EProcMapFilter::Contains, "/lib64/").empty();
+
+		bIsBitOk = bIsLocal64bit == bIsRemote64bit;
 
 		if (bIsBitOk)
 		{
@@ -159,8 +160,8 @@ DumpLabel:
 		{
 			bSuccess = false;
 			OutErr   = std::format("Dumper is {}bit but target app is {}bit!",
-                                 isLocal64bit ? "64" : "32",
-                                 isRemote64bit ? "64" : "32");
+                                 bIsLocal64bit ? "64" : "32",
+                                 bIsRemote64bit ? "64" : "32");
 		}
 	}
 	catch (const std::exception& E)
