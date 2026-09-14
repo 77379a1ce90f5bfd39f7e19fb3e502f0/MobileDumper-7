@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <fstream>
 #include <mutex>
 #include <string>
