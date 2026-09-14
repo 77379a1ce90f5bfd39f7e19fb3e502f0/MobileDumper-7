@@ -1,7 +1,7 @@
 ## MobileDumper-7 — iOS Theos Tweak Makefile
 ## Build from this directory: make package
 
-THEOS_PACKAGE_SCHEME ?= roothide
+THEOS_PACKAGE_SCHEME ?= rootless
 TARGET  = iphone:clang:latest:14.0
 ARCHS   = arm64 #arm64e
 DEBUG   ?= 0
@@ -33,7 +33,6 @@ endif
 DISABLED_WARNINGS = -Wno-unused-parameter \
     -Wno-unused-function \
     -Wno-missing-field-initializers \
-    -Wno-missing-designated-field-initializers \
     -Wno-deprecated-declarations
 
 $(TWEAK_NAME)_CCFLAGS = \
