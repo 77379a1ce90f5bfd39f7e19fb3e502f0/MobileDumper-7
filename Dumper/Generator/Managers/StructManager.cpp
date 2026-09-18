@@ -20,14 +20,14 @@ int32 StructInfoHandle::GetLastMemberEnd() const
 int32 StructInfoHandle::GetSize() const
 {
 	/*
-	 * Utils::Align(0, Alignment) rounds back down to 0 (0 is already a multiple of any alignment),
+	 * Utils::Memory::AlignUp(0, Alignment) rounds back down to 0 (0 is already a multiple of any alignment),
 	 * but no complete C++ type can actually have sizeof == 0 -- an empty type's size is always at
 	 * least its own alignment (the compiler pads a zero-member alignas(N) type up to N bytes).
 	 * Falling through the plain 0 here would under-report the real compiled size of a memberless
 	 * struct with a non-trivial alignment, corrupting both its own size assertion and the offset
 	 * math of anything that embeds it as a member.
 	 */
-	const int32 AlignedSize = Utils::Align(Info->Size, Info->Alignment);
+	const int32 AlignedSize = Utils::Memory::AlignUp(Info->Size, Info->Alignment);
 	return AlignedSize > 0x0 ? AlignedSize : Info->Alignment;
 }
 
@@ -362,7 +362,7 @@ void StructManager::InitSizesAndIsFinal()
 			const bool bHasMembers = S.HasMembers();
 
 			// Only change lowest offset if it's lower than the already found lowest offset (by default: struct-size)
-			if (Utils::Align(SizeToCheck, Info.Alignment) > LowestOffset /*&& (bHasMembers || Info.Size != 0x1)*/)
+			if (Utils::Memory::AlignUp(SizeToCheck, Info.Alignment) > LowestOffset /*&& (bHasMembers || Info.Size != 0x1)*/)
 			{
 				if (Info.Size > LowestOffset)
 					Info.Size = LowestOffset;

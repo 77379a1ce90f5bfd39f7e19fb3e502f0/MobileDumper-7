@@ -4,6 +4,7 @@
 #include "../../Utils/Encoding/UnicodeNames.h"
 #include "../../Utils/Utils.h"
 
+#include "../OffsetFinder/DecryptCallbacks.h"
 #include "../OffsetFinder/Offsets.h"
 
 #include "NameArray.h"
@@ -120,7 +121,8 @@ std::string FName::ToValidString() const
 
 int32 FName::GetCompIdx() const
 {
-	return GMemory->Read<int32>(reinterpret_cast<uintptr_t>(Address) + GOffsets.FName.CompIdx);
+	const uintptr_t Addr = reinterpret_cast<uintptr_t>(Address) + GOffsets.FName.CompIdx;
+	return GDecryptCallbacks.FName.CompIdx(GMemory->Read<int32>(Addr), Addr);
 }
 
 uint32 FName::GetNumber() const
@@ -128,10 +130,12 @@ uint32 FName::GetNumber() const
 	if (InternalSettings::bUseOutlineNumberName)
 		return 0x0;
 
-	if (InternalSettings::bUseNamePool)
-		return GMemory->Read<uint32>(reinterpret_cast<uintptr_t>(Address) + GOffsets.FName.Number); // The number is uint32 on versions <= UE4.23
+	const uintptr_t Addr = reinterpret_cast<uintptr_t>(Address) + GOffsets.FName.Number;
 
-	return static_cast<uint32_t>(GMemory->Read<int32>(reinterpret_cast<uintptr_t>(Address) + GOffsets.FName.Number));
+	if (InternalSettings::bUseNamePool)
+		return GDecryptCallbacks.FName.Number(GMemory->Read<uint32>(Addr), Addr); // The number is uint32 on versions <= UE4.23
+
+	return GDecryptCallbacks.FName.Number(static_cast<uint32>(GMemory->Read<int32>(Addr)), Addr);
 }
 
 bool FName::operator==(FName Other) const

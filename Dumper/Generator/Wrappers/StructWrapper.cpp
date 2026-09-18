@@ -103,7 +103,7 @@ int32 StructWrapper::GetAlignment() const
 
 int32 StructWrapper::GetSize() const
 {
-	return bIsUnrealStruct ? InfoHandle.GetSize() : Utils::Align(PredefStruct->Size, PredefStruct->Alignment);
+	return bIsUnrealStruct ? InfoHandle.GetSize() : Utils::Memory::AlignUp(PredefStruct->Size, PredefStruct->Alignment);
 }
 
 int32 StructWrapper::GetUnalignedSize() const

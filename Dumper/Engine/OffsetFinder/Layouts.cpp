@@ -1,5 +1,7 @@
 #include "Layouts.h"
 
+#include "DecryptCallbacks.h"
+
 #include <algorithm>
 #include <cstring>
 #include <functional>
@@ -28,6 +30,20 @@ namespace LayoutDetection
 				return false;
 
 			Out = GMemory->Read<T>(Address);
+			return true;
+		}
+
+		/*
+		 * SafeRead followed by the field's decrypt hook. Kept as one call so the range checks
+		 * that normally sit alongside the read can stay in the same expression.
+		 */
+		template <typename T, typename FnT>
+		bool SafeReadDecrypted(uintptr_t Address, T& Out, const FnT& DecryptFn)
+		{
+			if (!SafeRead(Address, Out))
+				return false;
+
+			Out = DecryptFn(Out, Address);
 			return true;
 		}
 
@@ -164,23 +180,30 @@ namespace LayoutDetection
 			int32 Count  = 0;
 		};
 
-		std::vector<int32> CollectPointerCandidates(const std::vector<uint8_t>& Block)
+		/*
+		 * Root is the address Block was read from, so a decrypted value can be produced for each
+		 * candidate offset. Without that an encrypted field never passes the filters below and the
+		 * offset is never even considered.
+		 */
+		template <typename FnT>
+		std::vector<int32> CollectPointerCandidates(uintptr_t Root, const std::vector<uint8_t>& Block, const FnT& DecryptFn)
 		{
 			std::vector<int32> Result;
 			for (size_t Offset = 0; Offset + sizeof(void*) <= Block.size(); Offset += sizeof(void*))
 			{
-				if (IsReadable(PeekPtr(Block, Offset)))
+				if (IsReadable(DecryptFn(PeekPtr(Block, Offset), Root + Offset)))
 					Result.push_back(static_cast<int32>(Offset));
 			}
 			return Result;
 		}
 
-		std::vector<int32> CollectInt32Candidates(const std::vector<uint8_t>& Block, int32 Min, int32 Max)
+		template <typename FnT>
+		std::vector<int32> CollectInt32Candidates(uintptr_t Root, const std::vector<uint8_t>& Block, int32 Min, int32 Max, const FnT& DecryptFn)
 		{
 			std::vector<int32> Result;
 			for (size_t Offset = 0; Offset + sizeof(int32) <= Block.size(); Offset += sizeof(int32))
 			{
-				const int32 Value = PeekInt32(Block, Offset);
+				const int32 Value = DecryptFn(PeekInt32(Block, Offset), Root + Offset);
 				if (Value >= Min && Value <= Max)
 					Result.push_back(static_cast<int32>(Offset));
 			}
@@ -292,6 +315,10 @@ namespace LayoutDetection
 			int32 ItemSize     = -1;
 			int32 IndexOffset  = -1;
 
+			// Which layout's hook applies is only known by the caller that builds this, so the
+			// hook travels with the layout rather than being chosen inside ReadObjectAt.
+			std::function<uintptr_t(uintptr_t, uintptr_t)> DecryptObject;
+
 			bool IsValid() const { return ObjectOffset != -1 && ItemSize > 0 && IndexOffset != -1; }
 		};
 
@@ -300,12 +327,14 @@ namespace LayoutDetection
 			if (ItemAddr == 0 || Item.ObjectOffset < 0)
 				return 0;
 
+			const uintptr_t ObjectAddr = ItemAddr + Item.ObjectOffset;
+
 			uintptr_t Ptr = 0;
-			if (!SafeRead(ItemAddr + Item.ObjectOffset, Ptr))
+			if (!SafeRead(ObjectAddr, Ptr))
 				return 0;
 
-			if (ObjectArray::DecryptObjectItemFn)
-				ObjectArray::DecryptObjectItemFn(Ptr);
+			if (Item.DecryptObject)
+				Ptr = Item.DecryptObject(Ptr, ObjectAddr);
 
 			return Ptr;
 		}
@@ -502,8 +531,9 @@ namespace LayoutDetection
 						continue;
 
 					FItemLayout Candidate;
-					Candidate.ObjectOffset = ObjectOffset;
-					Candidate.ItemSize     = ItemSize;
+					Candidate.ObjectOffset  = ObjectOffset;
+					Candidate.ItemSize      = ItemSize;
+					Candidate.DecryptObject = Out->DecryptObject;
 
 					if (VerifyItemLayout(AddrFn, MaxIndex, &Candidate))
 					{
@@ -652,7 +682,7 @@ namespace LayoutDetection
 		 * - by looking for two header int32s that divide to a plausible power-of-two chunk
 		 * size. Only if that also fails is the conventional default used.
 		 */
-		int32 DiscoverElementsPerChunk(uintptr_t ChunksBase, int32 ChunkCount, const FItemLayout& Item, const std::vector<uint8_t>& Header, int32 ObjectsOffset)
+		int32 DiscoverElementsPerChunk(uintptr_t Root, uintptr_t ChunksBase, int32 ChunkCount, const FItemLayout& Item, const std::vector<uint8_t>& Header, int32 ObjectsOffset)
 		{
 			if (ChunkCount >= 2)
 			{
@@ -679,7 +709,7 @@ namespace LayoutDetection
 				if (Overlaps(CapOffset))
 					continue;
 
-				const int32 MaxElements = PeekInt32(Header, CapOffset);
+				const int32 MaxElements = GDecryptCallbacks.ChunkedObjects.MaxElements(PeekInt32(Header, CapOffset), Root + CapOffset);
 				if (MaxElements < kMinElementsPerChunk || MaxElements > kMaxObjectCapacity)
 					continue;
 
@@ -688,7 +718,7 @@ namespace LayoutDetection
 					if (ChunkOffset == CapOffset || Overlaps(ChunkOffset))
 						continue;
 
-					const int32 MaxChunks = PeekInt32(Header, ChunkOffset);
+					const int32 MaxChunks = GDecryptCallbacks.ChunkedObjects.MaxChunks(PeekInt32(Header, ChunkOffset), Root + ChunkOffset);
 					if (MaxChunks <= 0 || MaxChunks > kMaxChunkScan * kMaxChunkScan)
 						continue;
 
@@ -784,8 +814,8 @@ namespace LayoutDetection
 		bool EnumerateFixedCandidates(uintptr_t Root, const std::vector<uint8_t>& Header, const FOptions& Options, std::vector<FObjectsCandidate>& Out, std::vector<std::string>& Failures)
 		{
 			bool bFoundItems                       = false;
-			const std::vector<int32> PtrCandidates = CollectPointerCandidates(Header);
-			const std::vector<int32> IntCandidates = CollectInt32Candidates(Header, kMinObjectCount, kMaxObjectCount);
+			const std::vector<int32> PtrCandidates = CollectPointerCandidates(Root, Header, GDecryptCallbacks.FixedObjects.Objects);
+			const std::vector<int32> IntCandidates = CollectInt32Candidates(Root, Header, kMinObjectCount, kMaxObjectCount, GDecryptCallbacks.FixedObjects.NumObjects);
 
 			if (PtrCandidates.empty() || IntCandidates.empty())
 			{
@@ -795,7 +825,7 @@ namespace LayoutDetection
 
 			for (int32 ObjectsOffset : PtrCandidates)
 			{
-				const uintptr_t ItemsBase = PeekPtr(Header, static_cast<size_t>(ObjectsOffset));
+				const uintptr_t ItemsBase = GDecryptCallbacks.FixedObjects.Objects(PeekPtr(Header, static_cast<size_t>(ObjectsOffset)), Root + ObjectsOffset);
 
 				FItemAddrFn AddrFn = [ItemsBase](int32 Index, int32 ItemSize) -> uintptr_t
 				{
@@ -803,6 +833,7 @@ namespace LayoutDetection
 				};
 
 				FItemLayout Item;
+				Item.DecryptObject = GDecryptCallbacks.FixedObjects.FUObjectItem.Object;
 				if (!DiscoverItemLayout(ItemsBase, AddrFn, 0, &Item))
 				{
 					Reject(Failures, fmt::format("EnumerateFixedCandidates: Objects@+0x{:X} -> 0x{:X} - no item stride held across samples", ObjectsOffset, ItemsBase));
@@ -817,7 +848,7 @@ namespace LayoutDetection
 					if (NumOffset >= ObjectsOffset && NumOffset < ObjectsOffset + kPtrSize)
 						continue;
 
-					const int32 Num = PeekInt32(Header, static_cast<size_t>(NumOffset));
+					const int32 Num = GDecryptCallbacks.FixedObjects.NumObjects(PeekInt32(Header, static_cast<size_t>(NumOffset)), Root + NumOffset);
 					if (Num < kMinObjectCount || Num > kMaxObjectCount)
 						continue;
 
@@ -861,18 +892,18 @@ namespace LayoutDetection
 					Candidate.SamplesTested = Tested;
 					Candidate.SamplesValid  = Valid;
 					Candidate.Summary       = fmt::format("EnumerateFixedCandidates: Objects@+0x{:X} Num@+0x{:X}={} stride=0x{:X} objOff=0x{:X} items {}/{} tail {:.0f}%",
-					                                      ObjectsOffset,
-					                                      NumOffset,
-					                                      Num,
-					                                      Item.ItemSize,
-					                                      Item.ObjectOffset,
-					                                      Valid,
-					                                      Tested,
-					                                      PastRatio * 100.0);
+                                                    ObjectsOffset,
+                                                    NumOffset,
+                                                    Num,
+                                                    Item.ItemSize,
+                                                    Item.ObjectOffset,
+                                                    Valid,
+                                                    Tested,
+                                                    PastRatio * 100.0);
 					Candidate.Description   = fmt::format("EnumerateFixedCandidates: Fixed array candidate - {} objects, {} of {} sampled slots held a valid object",
-					                                      Num,
-					                                      Valid,
-					                                      Tested);
+                                                        Num,
+                                                        Valid,
+                                                        Tested);
 					Candidate.Layout        = std::move(Layout);
 					Out.push_back(std::move(Candidate));
 				}
@@ -889,8 +920,8 @@ namespace LayoutDetection
 		bool EnumerateChunkedCandidates(uintptr_t Root, const std::vector<uint8_t>& Header, const FOptions& Options, std::vector<FObjectsCandidate>& Out, std::vector<std::string>& Failures)
 		{
 			bool bFoundItems                       = false;
-			const std::vector<int32> PtrCandidates = CollectPointerCandidates(Header);
-			const std::vector<int32> IntCandidates = CollectInt32Candidates(Header, kMinObjectCount, kMaxObjectCount);
+			const std::vector<int32> PtrCandidates = CollectPointerCandidates(Root, Header, GDecryptCallbacks.ChunkedObjects.Objects);
+			const std::vector<int32> IntCandidates = CollectInt32Candidates(Root, Header, kMinObjectCount, kMaxObjectCount, GDecryptCallbacks.ChunkedObjects.NumElements);
 
 			if (PtrCandidates.empty() || IntCandidates.empty())
 			{
@@ -900,7 +931,7 @@ namespace LayoutDetection
 
 			for (int32 ObjectsOffset : PtrCandidates)
 			{
-				const uintptr_t ChunksBase = PeekPtr(Header, static_cast<size_t>(ObjectsOffset));
+				const uintptr_t ChunksBase = GDecryptCallbacks.ChunkedObjects.Objects(PeekPtr(Header, static_cast<size_t>(ObjectsOffset)), Root + ObjectsOffset);
 
 				const int32 ChunkCount = CountReadableChunkPointers(ChunksBase);
 				if (ChunkCount < kMinChunkPtrRun)
@@ -920,6 +951,7 @@ namespace LayoutDetection
 				};
 
 				FItemLayout Item;
+				Item.DecryptObject = GDecryptCallbacks.ChunkedObjects.FUObjectItem.Object;
 				if (!DiscoverItemLayout(FirstChunk, ProbeFn, 0, &Item))
 				{
 					Reject(Failures, fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} chunk0 0x{:X} - no item stride held across samples", ObjectsOffset, FirstChunk));
@@ -928,7 +960,7 @@ namespace LayoutDetection
 
 				bFoundItems = true;
 
-				const int32 ElementsPerChunk = DiscoverElementsPerChunk(ChunksBase, ChunkCount, Item, Header, ObjectsOffset);
+				const int32 ElementsPerChunk = DiscoverElementsPerChunk(Root, ChunksBase, ChunkCount, Item, Header, ObjectsOffset);
 				if (ElementsPerChunk < kMinElementsPerChunk || ElementsPerChunk > kMaxElementsPerChunk)
 				{
 					Reject(Failures, fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} - ElementsPerChunk resolved to 0x{:X}, outside [0x{:X}, 0x{:X}]", ObjectsOffset, ElementsPerChunk, kMinElementsPerChunk, kMaxElementsPerChunk));
@@ -942,7 +974,7 @@ namespace LayoutDetection
 
 				// A live object past a candidate's count disproves it outright, so check this
 				// once up front instead of per candidate.
-				const int32 CapIndex             = ChunkCount * ElementsPerChunk;
+				const int32 CapIndex              = ChunkCount * ElementsPerChunk;
 				const int32 ObservedMaxValidIndex = FindObservedMaxValidIndex(AddrFn, Item, CapIndex, Options.MaxSamples);
 
 				for (int32 NumOffset : IntCandidates)
@@ -950,7 +982,7 @@ namespace LayoutDetection
 					if (NumOffset >= ObjectsOffset && NumOffset < ObjectsOffset + kPtrSize)
 						continue;
 
-					const int32 Num = PeekInt32(Header, static_cast<size_t>(NumOffset));
+					const int32 Num = GDecryptCallbacks.ChunkedObjects.NumElements(PeekInt32(Header, static_cast<size_t>(NumOffset)), Root + NumOffset);
 					if (Num < kMinObjectCount || Num > kMaxObjectCount)
 						continue;
 
@@ -973,10 +1005,10 @@ namespace LayoutDetection
 					if (ChunkCount < 2 && Num > ElementsPerChunk)
 						continue;
 
-					int32 Tested        = 0;
-					int32 Valid         = 0;
-					double SampleRatio  = ScoreObjectSamples(AddrFn, Item, Num, Options.MaxSamples, &Tested, &Valid);
-					bool bUsedFallback  = false;
+					int32 Tested       = 0;
+					int32 Valid        = 0;
+					double SampleRatio = ScoreObjectSamples(AddrFn, Item, Num, Options.MaxSamples, &Tested, &Valid);
+					bool bUsedFallback = false;
 
 					// The correct NumElements can still fail this check on a churny target, so
 					// try two cheaper fallbacks before giving up on the candidate.
@@ -984,8 +1016,8 @@ namespace LayoutDetection
 					{
 						// Density just below the claimed count - usually still dense there even
 						// when the rest of the range is dead.
-						int32 BoundaryTested        = 0;
-						int32 BoundaryValid         = 0;
+						int32 BoundaryTested       = 0;
+						int32 BoundaryValid        = 0;
 						const double BoundaryRatio = ScoreBoundaryDensity(AddrFn, Item, Num, kBoundaryWindowSize, Options.MaxSamples, &BoundaryTested, &BoundaryValid);
 
 						if (BoundaryRatio >= Options.MinimumConfidence)
@@ -1048,21 +1080,21 @@ namespace LayoutDetection
 					Candidate.SamplesTested = Tested;
 					Candidate.SamplesValid  = Valid;
 					Candidate.Summary       = fmt::format("EnumerateChunkedCandidates: Objects@+0x{:X} Num@+0x{:X}={} EPC=0x{:X} stride=0x{:X} objOff=0x{:X} items {}/{}{} tail {:.0f}%",
-					                                      ObjectsOffset,
-					                                      NumOffset,
-					                                      Num,
-					                                      ElementsPerChunk,
-					                                      Item.ItemSize,
-					                                      Item.ObjectOffset,
-					                                      Valid,
-					                                      Tested,
-					                                      bUsedFallback ? " (fallback)" : "",
-					                                      PastRatio * 100.0);
+                                                    ObjectsOffset,
+                                                    NumOffset,
+                                                    Num,
+                                                    ElementsPerChunk,
+                                                    Item.ItemSize,
+                                                    Item.ObjectOffset,
+                                                    Valid,
+                                                    Tested,
+                                                    bUsedFallback ? " (fallback)" : "",
+                                                    PastRatio * 100.0);
 					Candidate.Description   = fmt::format("EnumerateChunkedCandidates: Chunked array candidate - {} objects in chunks of {}, {} of {} sampled slots held a valid object",
-					                                      Num,
-					                                      ElementsPerChunk,
-					                                      Valid,
-					                                      Tested);
+                                                        Num,
+                                                        ElementsPerChunk,
+                                                        Valid,
+                                                        Tested);
 					Candidate.Layout        = std::move(Layout);
 					Out.push_back(std::move(Candidate));
 				}
@@ -1158,7 +1190,7 @@ namespace LayoutDetection
 					NameArray::DecryptNameEntryFn(EntryAddr);
 
 				uint16 Header = 0;
-				if (!SafeRead(EntryAddr + Layout.FNameEntry.Header, Header))
+				if (!SafeReadDecrypted(EntryAddr + Layout.FNameEntry.Header, Header, GDecryptCallbacks.NamePool.FNameEntry.Header))
 					break;
 
 				const int32 NameLen = Layout.FNameEntry.GetLength(Header);
@@ -1210,9 +1242,7 @@ namespace LayoutDetection
 		 * The previous implementation instead required the literal "Byte" immediately after
 		 * "None", which fails on any game that reorders or obfuscates names past index 0.
 		 */
-		bool DiscoverPoolEntryLayout(uintptr_t BlockStart, FNamePoolLayout* Out, int32* OutWalkScore,
-		                             const std::function<int32(uint16)>& OverrideGetLength = nullptr,
-		                             const std::function<bool(uint16)>&  OverrideGetIsWide = nullptr)
+		bool DiscoverPoolEntryLayout(uintptr_t BlockStart, FNamePoolLayout* Out, int32* OutWalkScore, const std::function<int32(uint16)>& OverrideGetLength = nullptr, const std::function<bool(uint16)>& OverrideGetIsWide = nullptr)
 		{
 			if (!Out)
 				return false;
@@ -1236,7 +1266,8 @@ namespace LayoutDetection
 			int32 BestWalk = 0;
 			bool bFound    = false;
 
-			const std::function<bool(uint16)> DefaultGetIsWide = [](uint16 H) -> bool { return (H & kDefaultNameWideMask) != 0; };
+			const std::function<bool(uint16)> DefaultGetIsWide = [](uint16 H) -> bool
+			{ return (H & kDefaultNameWideMask) != 0; };
 
 			for (int32 HeaderOffset : HeaderCandidates)
 			{
@@ -1284,7 +1315,8 @@ namespace LayoutDetection
 							Candidate.FNameEntry.Header    = HeaderOffset;
 							Candidate.FNameEntry.String    = StringOffset;
 							Candidate.FNameEntry.Stride    = Stride;
-							Candidate.FNameEntry.GetLength = [Shift](uint16 H) -> int32 { return H >> Shift; };
+							Candidate.FNameEntry.GetLength = [Shift](uint16 H) -> int32
+							{ return H >> Shift; };
 							Candidate.FNameEntry.GetIsWide = OverrideGetIsWide ? OverrideGetIsWide : DefaultGetIsWide;
 
 							const int32 Walk = WalkPoolEntries(BlockStart, Candidate, nullptr);
@@ -1422,7 +1454,7 @@ namespace LayoutDetection
 								NameArray::DecryptNameEntryFn(EntryAddr);
 
 							uint16 Header = 0;
-							if (!SafeRead(EntryAddr + Layout.FNameEntry.Header, Header))
+							if (!SafeReadDecrypted(EntryAddr + Layout.FNameEntry.Header, Header, GDecryptCallbacks.NamePool.FNameEntry.Header))
 								continue;
 
 							const int32 NameLen = Layout.FNameEntry.GetLength(Header);
@@ -1549,7 +1581,7 @@ namespace LayoutDetection
 
 			for (const FPointerRun& Run : CollectPointerRuns(Header, NameArray::DecryptNameChunkFn))
 			{
-				uintptr_t FirstBlock = PeekPtr(Header, static_cast<size_t>(Run.Offset));
+				uintptr_t FirstBlock = GDecryptCallbacks.NamePool.Blocks(PeekPtr(Header, static_cast<size_t>(Run.Offset)), Root + Run.Offset);
 				if (NameArray::DecryptNameChunkFn)
 					NameArray::DecryptNameChunkFn(0, FirstBlock);
 
@@ -1691,18 +1723,18 @@ namespace LayoutDetection
 				Candidate.SamplesTested = kNameWalkCount;
 				Candidate.SamplesValid  = Decoded;
 				Candidate.Summary       = fmt::format("EnumeratePoolCandidates: Blocks@+0x{:X} blocksBit=0x{:X} hdr=0x{:X} str=0x{:X} stride={} entries {}/{} known={}",
-				                                      Layout.Blocks,
-				                                      Layout.BlocksBit,
-				                                      Layout.FNameEntry.Header,
-				                                      Layout.FNameEntry.String,
-				                                      Layout.FNameEntry.Stride,
-				                                      Decoded,
-				                                      kNameWalkCount,
-				                                      KnownHits);
+                                                Layout.Blocks,
+                                                Layout.BlocksBit,
+                                                Layout.FNameEntry.Header,
+                                                Layout.FNameEntry.String,
+                                                Layout.FNameEntry.Stride,
+                                                Decoded,
+                                                kNameWalkCount,
+                                                KnownHits);
 				Candidate.Description   = fmt::format("EnumeratePoolCandidates: Name pool candidate - decoded {} of {} sample names, {} matched known engine names",
-				                                      Decoded,
-				                                      kNameWalkCount,
-				                                      KnownHits);
+                                                    Decoded,
+                                                    kNameWalkCount,
+                                                    KnownHits);
 				Candidate.Layout        = std::make_unique<FNamePoolLayout>(Layout);
 				Out.push_back(std::move(Candidate));
 			}
@@ -1759,7 +1791,7 @@ namespace LayoutDetection
 						continue;
 
 					uint32 IndexField = 0;
-					if (!SafeRead(EntryAddr + Offset, IndexField))
+					if (!SafeReadDecrypted(EntryAddr + Offset, IndexField, GDecryptCallbacks.NameArray.FNameEntry.Index))
 						continue;
 
 					// A live entry that disagrees does rule the offset out.
@@ -1805,7 +1837,7 @@ namespace LayoutDetection
 				return 0;
 
 			uint32 IndexField = 0;
-			if (!SafeRead(FirstEntry + Layout.FNameEntry.Index, IndexField))
+			if (!SafeReadDecrypted(FirstEntry + Layout.FNameEntry.Index, IndexField, GDecryptCallbacks.NameArray.FNameEntry.Index))
 				return 0;
 
 			const int32 ElementsPerChunk = static_cast<int32>(IndexField >> 1);
@@ -1854,7 +1886,7 @@ namespace LayoutDetection
 				}
 
 				uint32 IndexField = 0;
-				if (!SafeRead(EntryAddr + Layout.FNameEntry.Index, IndexField))
+				if (!SafeReadDecrypted(EntryAddr + Layout.FNameEntry.Index, IndexField, GDecryptCallbacks.NameArray.FNameEntry.Index))
 				{
 					if (OutStopReason)
 						*OutStopReason = fmt::format("WalkArrayEntries: Entry [{}] at 0x{:X} has no readable index field at +0x{:X}", i, EntryAddr, Layout.FNameEntry.Index);
@@ -1946,7 +1978,7 @@ namespace LayoutDetection
 					return false;
 
 				uint32 IndexField = 0;
-				return SafeRead(EntryAddr + Layout.FNameEntry.Index, IndexField) && static_cast<int32>(IndexField >> 1) == Index;
+				return SafeReadDecrypted(EntryAddr + Layout.FNameEntry.Index, IndexField, GDecryptCallbacks.NameArray.FNameEntry.Index) && static_cast<int32>(IndexField >> 1) == Index;
 			};
 
 			// The already-allocated chunk pointers occupy
@@ -1962,7 +1994,7 @@ namespace LayoutDetection
 				if (Offset + sizeof(int32) > ChunksFieldBegin && Offset < ChunksFieldEnd)
 					continue;
 
-				const int32 Value = PeekInt32(Wide, Offset);
+				const int32 Value = GDecryptCallbacks.NameArray.NumElements(PeekInt32(Wide, Offset), Root + Offset);
 				if (Value < kMinNameCount || Value > kMaxNameElements)
 					continue;
 
@@ -2075,32 +2107,32 @@ namespace LayoutDetection
 				{
 					const FNameArrayLayout Snapshot = Layout;
 					CrossRatio                      = CrossValidateWithObjects([&Snapshot, ChunksBase](int32 Index) -> std::string
-					{
-						const int32 ChunkIdx = Index / Snapshot.ElementsPerChunk;
-						const int32 InChunk  = Index % Snapshot.ElementsPerChunk;
+                    {
+                        const int32 ChunkIdx = Index / Snapshot.ElementsPerChunk;
+                        const int32 InChunk  = Index % Snapshot.ElementsPerChunk;
 
-						uintptr_t ChunkAddr = 0;
-						if (!SafeRead(ChunksBase + static_cast<uintptr_t>(ChunkIdx) * kPtrSize, ChunkAddr))
-							return {};
+                        uintptr_t ChunkAddr = 0;
+                        if (!SafeRead(ChunksBase + static_cast<uintptr_t>(ChunkIdx) * kPtrSize, ChunkAddr))
+                            return {};
 
-						if (NameArray::DecryptNameChunkFn)
-							NameArray::DecryptNameChunkFn(ChunkIdx, ChunkAddr);
+                        if (NameArray::DecryptNameChunkFn)
+                            NameArray::DecryptNameChunkFn(ChunkIdx, ChunkAddr);
 
-						if (!IsReadable(ChunkAddr))
-							return {};
+                        if (!IsReadable(ChunkAddr))
+                            return {};
 
-						uintptr_t EntryAddr = 0;
-						if (!SafeRead(ChunkAddr + static_cast<uintptr_t>(InChunk) * kPtrSize, EntryAddr))
-							return {};
+                        uintptr_t EntryAddr = 0;
+                        if (!SafeRead(ChunkAddr + static_cast<uintptr_t>(InChunk) * kPtrSize, EntryAddr))
+                            return {};
 
-						if (NameArray::DecryptNameEntryFn)
-							NameArray::DecryptNameEntryFn(EntryAddr);
+                        if (NameArray::DecryptNameEntryFn)
+                            NameArray::DecryptNameEntryFn(EntryAddr);
 
-						if (!IsReadable(EntryAddr))
-							return {};
+                        if (!IsReadable(EntryAddr))
+                            return {};
 
-						return ReadDecryptedName(EntryAddr + Snapshot.FNameEntry.String, kMaxNameLen);
-					});
+                        return ReadDecryptedName(EntryAddr + Snapshot.FNameEntry.String, kMaxNameLen);
+                    });
 				}
 
 				FNamesCandidate Candidate;
@@ -2109,18 +2141,18 @@ namespace LayoutDetection
 				Candidate.SamplesTested = kNameSampleCount;
 				Candidate.SamplesValid  = Decoded;
 				Candidate.Summary       = fmt::format("EnumerateArrayCandidates: Chunks@+0x{:X} EPC=0x{:X} {} idx=0x{:X} str=0x{:X} entries {}/{} known={}",
-				                                      Layout.Chunks,
-				                                      Layout.ElementsPerChunk,
-				                                      Layout.NumElements != -1 ? fmt::format("Num@+0x{:X}", Layout.NumElements) : "Num=none",
-				                                      Layout.FNameEntry.Index,
-				                                      Layout.FNameEntry.String,
-				                                      Decoded,
-				                                      kNameSampleCount,
-				                                      KnownHits);
+                                                Layout.Chunks,
+                                                Layout.ElementsPerChunk,
+                                                Layout.NumElements != -1 ? fmt::format("Num@+0x{:X}", Layout.NumElements) : "Num=none",
+                                                Layout.FNameEntry.Index,
+                                                Layout.FNameEntry.String,
+                                                Decoded,
+                                                kNameSampleCount,
+                                                KnownHits);
 				Candidate.Description   = fmt::format("EnumerateArrayCandidates: Name array candidate - decoded {} of {} sample names, {} matched known engine names",
-				                                      Decoded,
-				                                      kNameSampleCount,
-				                                      KnownHits);
+                                                    Decoded,
+                                                    kNameSampleCount,
+                                                    KnownHits);
 				Candidate.Layout        = std::make_unique<FNameArrayLayout>(Layout);
 				Out.push_back(std::move(Candidate));
 			}
@@ -2370,7 +2402,7 @@ namespace LayoutDetection
 
 		FItemLayout Item;
 		FItemAddrFn AddrFn;
-		int32 Num           = 0;
+		int32 Num             = 0;
 		int32 ChunkedCapIndex = -1;
 
 		if (Layout->GetType() == EObjectsType::Array)
@@ -2378,21 +2410,22 @@ namespace LayoutDetection
 			const FFixedUObjectArrayLayout& L = *static_cast<const FFixedUObjectArrayLayout*>(Layout);
 
 			uintptr_t ItemsBase = 0;
-			if (!SafeRead(CandidateAddress + L.Objects, ItemsBase) || !IsReadable(ItemsBase))
+			if (!SafeReadDecrypted(CandidateAddress + L.Objects, ItemsBase, GDecryptCallbacks.FixedObjects.Objects) || !IsReadable(ItemsBase))
 			{
 				Result.Failures.push_back(fmt::format("TestObjectsLayout: Objects@+0x{:X} did not yield a readable item array", L.Objects));
 				return Result;
 			}
 
-			if (!SafeRead(CandidateAddress + L.NumObjects, Num) || Num < kMinObjectCount || Num > kMaxObjectCount)
+			if (!SafeReadDecrypted(CandidateAddress + L.NumObjects, Num, GDecryptCallbacks.FixedObjects.NumObjects) || Num < kMinObjectCount || Num > kMaxObjectCount)
 			{
 				Result.Failures.push_back(fmt::format("TestObjectsLayout: NumObjects@+0x{:X} = {} is out of range [{}, {}]", L.NumObjects, Num, kMinObjectCount, kMaxObjectCount));
 				return Result;
 			}
 
-			Item.ObjectOffset = L.FUObjectItem.Object;
-			Item.ItemSize     = L.FUObjectItem.Size;
-			AddrFn            = [ItemsBase](int32 Index, int32 ItemSize) -> uintptr_t
+			Item.ObjectOffset  = L.FUObjectItem.Object;
+			Item.ItemSize      = L.FUObjectItem.Size;
+			Item.DecryptObject = GDecryptCallbacks.FixedObjects.FUObjectItem.Object;
+			AddrFn             = [ItemsBase](int32 Index, int32 ItemSize) -> uintptr_t
 			{ return GetFixedItemAddr(ItemsBase, ItemSize, Index); };
 
 			Result.Details.push_back(fmt::format("TestObjectsLayout: Fixed, Objects=0x{:X} Num={} stride=0x{:X}", L.Objects, Num, L.FUObjectItem.Size));
@@ -2403,13 +2436,13 @@ namespace LayoutDetection
 			const FChunkedUObjectArrayLayout& L = *static_cast<const FChunkedUObjectArrayLayout*>(Layout);
 
 			uintptr_t ChunksBase = 0;
-			if (!SafeRead(CandidateAddress + L.Objects, ChunksBase) || !IsReadable(ChunksBase))
+			if (!SafeReadDecrypted(CandidateAddress + L.Objects, ChunksBase, GDecryptCallbacks.ChunkedObjects.Objects) || !IsReadable(ChunksBase))
 			{
 				Result.Failures.push_back(fmt::format("TestObjectsLayout: Objects@+0x{:X} did not yield a readable chunk table", L.Objects));
 				return Result;
 			}
 
-			if (!SafeRead(CandidateAddress + L.NumElements, Num) || Num < kMinObjectCount || Num > kMaxObjectCount)
+			if (!SafeReadDecrypted(CandidateAddress + L.NumElements, Num, GDecryptCallbacks.ChunkedObjects.NumElements) || Num < kMinObjectCount || Num > kMaxObjectCount)
 			{
 				Result.Failures.push_back(fmt::format("TestObjectsLayout: NumElements@+0x{:X} = {} is out of range [{}, {}]", L.NumElements, Num, kMinObjectCount, kMaxObjectCount));
 				return Result;
@@ -2424,6 +2457,7 @@ namespace LayoutDetection
 			const int32 ElementsPerChunk = L.ElementsPerChunk;
 			Item.ObjectOffset            = L.FUObjectItem.Object;
 			Item.ItemSize                = L.FUObjectItem.Size;
+			Item.DecryptObject           = GDecryptCallbacks.ChunkedObjects.FUObjectItem.Object;
 			AddrFn                       = [ChunksBase, ElementsPerChunk](int32 Index, int32 ItemSize) -> uintptr_t
 			{ return GetChunkedItemAddr(ChunksBase, ElementsPerChunk, ItemSize, Index); };
 
@@ -2511,7 +2545,7 @@ namespace LayoutDetection
 			const FNamePoolLayout& L = *static_cast<const FNamePoolLayout*>(Layout);
 
 			uintptr_t FirstBlock = 0;
-			if (!SafeRead(CandidateAddress + L.Blocks, FirstBlock))
+			if (!SafeReadDecrypted(CandidateAddress + L.Blocks, FirstBlock, GDecryptCallbacks.NamePool.Blocks))
 			{
 				Result.Failures.push_back(fmt::format("TestNamesLayout: Blocks@+0x{:X} did not yield a readable block", L.Blocks));
 				return Result;
@@ -2532,14 +2566,14 @@ namespace LayoutDetection
 			if (L.MaxChunkIndex != -1)
 			{
 				int32 MaxChunkIndex = 0;
-				if (!SafeRead(CandidateAddress + L.MaxChunkIndex, MaxChunkIndex) || MaxChunkIndex < 0)
+				if (!SafeReadDecrypted(CandidateAddress + L.MaxChunkIndex, MaxChunkIndex, GDecryptCallbacks.NamePool.MaxChunkIndex) || MaxChunkIndex < 0)
 					Result.Failures.push_back(fmt::format("TestNamesLayout: MaxChunkIndex@+0x{:X} = {} is negative", L.MaxChunkIndex, MaxChunkIndex));
 			}
 
 			if (L.ByteCursor != -1)
 			{
 				int32 ByteCursor = 0;
-				if (!SafeRead(CandidateAddress + L.ByteCursor, ByteCursor) || ByteCursor < 0 || ByteCursor > kMaxByteCursor)
+				if (!SafeReadDecrypted(CandidateAddress + L.ByteCursor, ByteCursor, GDecryptCallbacks.NamePool.ByteCursor) || ByteCursor < 0 || ByteCursor > kMaxByteCursor)
 					Result.Failures.push_back(fmt::format("TestNamesLayout: ByteCursor@+0x{:X} = {} is out of range [0, 0x{:X}]", L.ByteCursor, ByteCursor, kMaxByteCursor));
 			}
 
@@ -2559,7 +2593,7 @@ namespace LayoutDetection
 			const FNameArrayLayout& L = *static_cast<const FNameArrayLayout*>(Layout);
 
 			uintptr_t FirstChunk = 0;
-			if (!SafeRead(CandidateAddress + L.Chunks, FirstChunk))
+			if (!SafeReadDecrypted(CandidateAddress + L.Chunks, FirstChunk, GDecryptCallbacks.NameArray.Chunks))
 			{
 				Result.Failures.push_back(fmt::format("TestNamesLayout: Chunks@+0x{:X} did not yield a readable chunk", L.Chunks));
 				return Result;

@@ -13,6 +13,7 @@
 #include "../../Memory/IMemory.h"
 #include "../../Utils/Logger.h"
 #include "../Unreal/NameArray.h"
+#include "DecryptCallbacks.h"
 
 
 namespace OffsetFinder
@@ -21,8 +22,12 @@ namespace OffsetFinder
 	constexpr int32_t OffsetFinderMinValue = sizeof(void*) == 4 ? 0x18 : 0x28;
 	constexpr int32_t OffsetFinderMaxValue = 0x1A0;
 
+	/*
+	 * DecryptFn, when set, is applied to each probed value. A field whose value is encrypted in
+	 * memory never matches the expected one otherwise, so the offset is simply never found.
+	 */
 	template <int Alignement = 4, typename T>
-	int32_t FindOffset(const std::vector<std::pair<void*, T>>& ObjectValuePair, int MinOffset = OffsetFinderMinValue, int MaxOffset = OffsetFinderMaxValue)
+	int32_t FindOffset(const std::vector<std::pair<void*, T>>& ObjectValuePair, int MinOffset = OffsetFinderMinValue, int MaxOffset = OffsetFinderMaxValue, const std::function<T(T, uintptr_t)>& DecryptFn = {})
 	{
 		int HighestFoundOffset = MinOffset;
 		bool bFoundOffset      = false;
@@ -37,7 +42,10 @@ namespace OffsetFinder
 
 			for (int j = HighestFoundOffset; j < MaxOffset; j += Alignement)
 			{
-				const T TypedValueAtOffset = GMemory->Read<T>(reinterpret_cast<uintptr_t>(ObjectValuePair[i].first) + j);
+				const uintptr_t ProbeAddr = reinterpret_cast<uintptr_t>(ObjectValuePair[i].first) + j;
+				T TypedValueAtOffset      = GMemory->Read<T>(ProbeAddr);
+				if (DecryptFn)
+					TypedValueAtOffset = DecryptFn(TypedValueAtOffset, ProbeAddr);
 
 				if (TypedValueAtOffset == ObjectValuePair[i].second && j >= HighestFoundOffset)
 				{
@@ -186,7 +194,7 @@ namespace OffsetFinder
 	}
 
 	template <bool bCheckForVft = true>
-	int32_t GetValidPointerOffset(const void* PtrObjA, const void* PtrObjB, int32_t StartingOffset, int32_t MaxOffset, bool bNeedsToBeInModuleMemory = false)
+	int32_t GetValidPointerOffset(const void* PtrObjA, const void* PtrObjB, int32_t StartingOffset, int32_t MaxOffset, bool bNeedsToBeInModuleMemory = false, const std::function<uintptr_t(uintptr_t, uintptr_t)>& DecryptFn = {})
 	{
 		const uint8_t* ObjA = static_cast<const uint8_t*>(PtrObjA);
 		const uint8_t* ObjB = static_cast<const uint8_t*>(PtrObjB);
@@ -196,10 +204,12 @@ namespace OffsetFinder
 
 		for (int j = StartingOffset; j <= MaxOffset; j += sizeof(void*))
 		{
-			const uintptr_t ValA = GMemory->Read<uintptr_t>(reinterpret_cast<uintptr_t>(ObjA) + j);
-			const uintptr_t ValB = GMemory->Read<uintptr_t>(reinterpret_cast<uintptr_t>(ObjB) + j);
-			const bool bIsAValid = GMemory->IsAddressReadable(ValA) && (bCheckForVft ? GMemory->IsAddressReadable(GMemory->Read<uintptr_t>(ValA)) : true);
-			const bool bIsBValid = GMemory->IsAddressReadable(ValB) && (bCheckForVft ? GMemory->IsAddressReadable(GMemory->Read<uintptr_t>(ValB)) : true);
+			const uintptr_t AddrA = reinterpret_cast<uintptr_t>(ObjA) + j;
+			const uintptr_t AddrB = reinterpret_cast<uintptr_t>(ObjB) + j;
+			const uintptr_t ValA  = DecryptFn ? DecryptFn(GMemory->Read<uintptr_t>(AddrA), AddrA) : GMemory->Read<uintptr_t>(AddrA);
+			const uintptr_t ValB  = DecryptFn ? DecryptFn(GMemory->Read<uintptr_t>(AddrB), AddrB) : GMemory->Read<uintptr_t>(AddrB);
+			const bool bIsAValid  = GMemory->IsAddressReadable(ValA) && (bCheckForVft ? GMemory->IsAddressReadable(GMemory->Read<uintptr_t>(ValA)) : true);
+			const bool bIsBValid  = GMemory->IsAddressReadable(ValB) && (bCheckForVft ? GMemory->IsAddressReadable(GMemory->Read<uintptr_t>(ValB)) : true);
 
 			if (bNeedsToBeInModuleMemory)
 			{
@@ -276,7 +286,10 @@ namespace OffsetFinder
 		}
 
 		auto GetDataAtOffsetAsInt = [](const void* Ptr, int32_t Offset) -> uint32_t
-		{ return GMemory->Read<uint32_t>(reinterpret_cast<uintptr_t>(Ptr) + Offset); };
+		{
+			const uintptr_t Addr = reinterpret_cast<uintptr_t>(Ptr) + Offset;
+			return static_cast<uint32_t>(GDecryptCallbacks.FName.CompIdx(static_cast<int32>(GMemory->Read<uint32_t>(Addr)), Addr));
+		};
 
 		const IteratorType VerifyStartIt = DataSetStartIterator;
 
@@ -332,13 +345,14 @@ namespace OffsetFinder
 			int32_t Checked = 0;
 			for (auto It = VerifyStartIt; It != DataSetEndIterator && Checked < 20; ++It, ++Checked)
 			{
-				const void* Addr     = (*It).GetAddress();
-				const int32_t CmpIdx = GMemory->Read<int32_t>(reinterpret_cast<uintptr_t>(Addr) + Off);
+				const void* Addr        = (*It).GetAddress();
+				const uintptr_t CmpAddr = reinterpret_cast<uintptr_t>(Addr) + Off;
+				const int32_t CmpIdx    = GDecryptCallbacks.FName.CompIdx(GMemory->Read<int32_t>(CmpAddr), CmpAddr);
 				if (CmpIdx <= 0)
 					continue;
 				const std::string Name = NameArray::GetNameEntry(CmpIdx).GetString();
 				const bool bValid      = !Name.empty() && Name.size() <= GSettings.General.MaxFNameLen && std::all_of(Name.begin(), Name.end(), [](char C)
-				{ return C >= 0x20 && C <= 0x7E; });
+                { return C >= 0x20 && C <= 0x7E; });
 				if (bValid)
 					Score++;
 			}

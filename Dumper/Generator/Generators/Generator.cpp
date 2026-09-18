@@ -5,6 +5,7 @@
 #include <fstream>
 
 #include "../../Architecture/IArchDecoder.h"
+#include "../../Engine/OffsetFinder/DecryptCallbacks.h"
 #include "../../Engine/OffsetFinder/Layouts.h"
 #include "../../Engine/OffsetFinder/Offsets.h"
 #include "../../Engine/Unreal/NameArray.h"
@@ -32,13 +33,13 @@ bool Generator::InitUnrealModule(std::string& OutErrorString)
 		if (ModInfo.IsValid())
 			break;
 
-		GLogger.FmtWrite(ELogLevel::Warning, "Failed to find Unreal Engine module, retrying in {} seconds...", RetryAfterSec);
+		GLogger.FmtWrite(ELogLevel::Warning, "Failed to find Unreal Engine module, retrying in {} seconds...\n", RetryAfterSec);
 		sleep(RetryAfterSec);
 	} while (--Retries > 0);
 
 	if (!ModInfo.IsValid())
 	{
-		OutErrorString = fmt::format("Failed to find Unreal Engine module after {} attempts!", Retries);
+		OutErrorString = fmt::format("Failed to find Unreal Engine module after {} attempts!\n", Retries);
 		GLogger.FmtWrite(ELogLevel::Error, "{}\n", OutErrorString);
 		return false;
 	}
@@ -88,11 +89,6 @@ bool Generator::InitUEAnalyzerKitty(std::string& OutErrorString)
 
 bool Generator::InitObjects(std::string& OutErrorString)
 {
-	ObjectArray::SetDecryptObjectItemFn([](uintptr_t& Item)
-	{
-		GProfile->DecryptObjectItem(Item);
-	});
-
 	// Resolves and then independently validates one interpretation of a candidate.
 	// Every stage reports its outcome, so a failing run shows exactly how far it got.
 	auto TryGObjectsAt = [](uintptr_t ArrayAddress, const char* Interpretation) -> bool
@@ -106,6 +102,12 @@ bool Generator::InitObjects(std::string& OutErrorString)
 		if (!GLayouts.ObjectsLayout)
 		{
 			GLogger.FmtWrite(ELogLevel::Warning, "InitObjects: [{}] Resolve succeeded but left the layout null!\n", Interpretation);
+			return false;
+		}
+
+		if (!GLayouts.ObjectsLayout->IsValid())
+		{
+			GLogger.FmtWrite(ELogLevel::Warning, "InitObjects: [{}] Resolve succeeded but the layout is missing required offsets!\n", Interpretation);
 			return false;
 		}
 
@@ -219,31 +221,33 @@ bool Generator::InitObjects(std::string& OutErrorString)
 	{
 		const FChunkedUObjectArrayLayout* L = static_cast<const FChunkedUObjectArrayLayout*>(GLayouts.ObjectsLayout.get());
 		GLogger.FmtWrite(ELogLevel::Info, "GObjects layout type: FChunkedFixedUObjectArray\n");
-		GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::Objects: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Objects, GMemory->Read<uintptr_t>(GObjects + L->Objects));
+		GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::Objects: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Objects, GDecryptCallbacks.ChunkedObjects.Objects(GMemory->Read<uintptr_t>(GObjects + L->Objects), GObjects + L->Objects));
 		if (L->MaxElements != -1)
-			GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::MaxElements: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->MaxElements, GMemory->Read<int32>(GObjects + L->MaxElements));
-		GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::NumElements: 0x{:X} -> 0x{:X}\n", (uint32_t)L->NumElements, GMemory->Read<int32>(GObjects + L->NumElements));
+			GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::MaxElements: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->MaxElements, GDecryptCallbacks.ChunkedObjects.MaxElements(GMemory->Read<int32>(GObjects + L->MaxElements), GObjects + L->MaxElements));
+		GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::NumElements: 0x{:X} -> 0x{:X}\n", (uint32_t)L->NumElements, GDecryptCallbacks.ChunkedObjects.NumElements(GMemory->Read<int32>(GObjects + L->NumElements), GObjects + L->NumElements));
 		if (L->MaxChunks != -1)
-			GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::MaxChunks: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->MaxChunks, GMemory->Read<int32>(GObjects + L->MaxChunks));
+			GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::MaxChunks: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->MaxChunks, GDecryptCallbacks.ChunkedObjects.MaxChunks(GMemory->Read<int32>(GObjects + L->MaxChunks), GObjects + L->MaxChunks));
 		if (L->NumChunks != -1)
-			GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::NumChunks: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->NumChunks, GMemory->Read<int32>(GObjects + L->NumChunks));
+			GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::NumChunks: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->NumChunks, GDecryptCallbacks.ChunkedObjects.NumChunks(GMemory->Read<int32>(GObjects + L->NumChunks), GObjects + L->NumChunks));
 		GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray::ElementsPerChunk: 0x{:X}\n", (uint32_t)L->ElementsPerChunk);
 		GLogger.FmtWrite(ELogLevel::Info, "FUObjectItem::Object: 0x{:X}\n", (uint32_t)L->FUObjectItem.Object);
 		GLogger.FmtWrite(ELogLevel::Info, "FUObjectItem::Size: 0x{:X}\n", (uint32_t)L->FUObjectItem.Size);
 
-		/*for (int i = 0; i < 0x40; i += 4)
+		/*
+		for (int i = 0; i < 0x90; i += 4)
 		{
 		    GLogger.FmtWrite(ELogLevel::Info, "FChunkedFixedUObjectArray[0x{:X}] = 0x{:X}\n", i, GMemory->Read<int32>(GObjects + i));
-		}*/
+		}
+		*/
 	}
 	else
 	{
 		const FFixedUObjectArrayLayout* L = static_cast<const FFixedUObjectArrayLayout*>(GLayouts.ObjectsLayout.get());
 		GLogger.FmtWrite(ELogLevel::Info, "GObjects layout type: FFixedUObjectArray\n");
-		GLogger.FmtWrite(ELogLevel::Info, "FFixedUObjectArray::Objects: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Objects, GMemory->Read<uintptr_t>(GObjects + L->Objects));
+		GLogger.FmtWrite(ELogLevel::Info, "FFixedUObjectArray::Objects: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Objects, GDecryptCallbacks.FixedObjects.Objects(GMemory->Read<uintptr_t>(GObjects + L->Objects), GObjects + L->Objects));
 		if (L->MaxObjects != -1)
-			GLogger.FmtWrite(ELogLevel::Info, "FFixedUObjectArray::MaxObjects: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->MaxObjects, GMemory->Read<int32>(GObjects + L->MaxObjects));
-		GLogger.FmtWrite(ELogLevel::Info, "FFixedUObjectArray::NumObjects: 0x{:X} -> 0x{:X}\n", (uint32_t)L->NumObjects, GMemory->Read<int32>(GObjects + L->NumObjects));
+			GLogger.FmtWrite(ELogLevel::Info, "FFixedUObjectArray::MaxObjects: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->MaxObjects, GDecryptCallbacks.FixedObjects.MaxObjects(GMemory->Read<int32>(GObjects + L->MaxObjects), GObjects + L->MaxObjects));
+		GLogger.FmtWrite(ELogLevel::Info, "FFixedUObjectArray::NumObjects: 0x{:X} -> 0x{:X}\n", (uint32_t)L->NumObjects, GDecryptCallbacks.FixedObjects.NumObjects(GMemory->Read<int32>(GObjects + L->NumObjects), GObjects + L->NumObjects));
 		GLogger.FmtWrite(ELogLevel::Info, "FUObjectItem::Object: 0x{:X}\n", (uint32_t)L->FUObjectItem.Object);
 		GLogger.FmtWrite(ELogLevel::Info, "FUObjectItem::Size: 0x{:X}\n", (uint32_t)L->FUObjectItem.Size);
 	}
@@ -252,6 +256,29 @@ bool Generator::InitObjects(std::string& OutErrorString)
 	{
 		return GProfile->GetObjectByIndex(GObjects, GLayouts.ObjectsLayout, Index);
 	});
+
+	/*
+	{
+	    for (int i = 0; i < 0x18; i += 8)
+	    {
+	        if (GLayouts.ObjectsLayout->GetType() == EObjectsType::Chunked)
+	            reinterpret_cast<FChunkedUObjectArrayLayout*>(GLayouts.ObjectsLayout.get())->FUObjectItem.Object = i;
+	        else
+	            reinterpret_cast<FFixedUObjectArrayLayout*>(GLayouts.ObjectsLayout.get())->FUObjectItem.Object = i;
+
+	        for (size_t j = sizeof(void*); j < 0x28; j += 4)
+	        {
+	            uintptr_t Addr = reinterpret_cast<uintptr_t>(ObjectArray::GetByIndex(1).GetAddress());
+	            if (!Addr)
+	                continue;
+
+	            int Index = GMemory->Read<int32>(Addr + j);
+	            GLogger.FmtWrite(ELogLevel::Info, "GetByIndex[0x{:X} + 0x{:X}] = 0x{:X}\n", Addr, j, Index);
+	        }
+	        GLogger.FmtWrite(ELogLevel::Info, "==============\n");
+	    }
+	}
+	*/
 
 	return true;
 }
@@ -296,6 +323,12 @@ bool Generator::InitNames(std::string& OutErrorString)
 		if (!GLayouts.NamesLayout)
 		{
 			GLogger.FmtWrite(ELogLevel::Warning, "InitNames: [{}] Resolve succeeded but left the layout null!\n", Interpretation);
+			return false;
+		}
+
+		if (!GLayouts.NamesLayout->IsValid())
+		{
+			GLogger.FmtWrite(ELogLevel::Warning, "InitNames: [{}] Resolve succeeded but the layout is missing required offsets!\n", Interpretation);
 			return false;
 		}
 
@@ -409,11 +442,11 @@ bool Generator::InitNames(std::string& OutErrorString)
 		GLogger.FmtWrite(ELogLevel::Info, "FNamePool::BlocksBit: 0x{:X}\n", (uint32_t)L->BlocksBit);
 		{
 			if (L->MaxChunkIndex != -1)
-				GLogger.FmtWrite(ELogLevel::Info, "FNamePool::MaxChunkIndex: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->MaxChunkIndex, GMemory->Read<int32>(GNames + L->MaxChunkIndex));
+				GLogger.FmtWrite(ELogLevel::Info, "FNamePool::MaxChunkIndex: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->MaxChunkIndex, GDecryptCallbacks.NamePool.MaxChunkIndex(GMemory->Read<int32>(GNames + L->MaxChunkIndex), GNames + L->MaxChunkIndex));
 			if (L->ByteCursor != -1)
-				GLogger.FmtWrite(ELogLevel::Info, "FNamePool::ByteCursor: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->ByteCursor, GMemory->Read<int32>(GNames + L->ByteCursor));
+				GLogger.FmtWrite(ELogLevel::Info, "FNamePool::ByteCursor: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->ByteCursor, GDecryptCallbacks.NamePool.ByteCursor(GMemory->Read<int32>(GNames + L->ByteCursor), GNames + L->ByteCursor));
 		}
-		GLogger.FmtWrite(ELogLevel::Info, "FNamePool::Blocks: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Blocks, GMemory->Read<uintptr_t>(GNames + L->Blocks));
+		GLogger.FmtWrite(ELogLevel::Info, "FNamePool::Blocks: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Blocks, GDecryptCallbacks.NamePool.Blocks(GMemory->Read<uintptr_t>(GNames + L->Blocks), GNames + L->Blocks));
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::Stride: 0x{:X}\n", (uint32_t)L->FNameEntry.Stride);
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::Header: 0x{:X}\n", (uint32_t)L->FNameEntry.Header);
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::String: 0x{:X}\n", (uint32_t)L->FNameEntry.String);
@@ -423,10 +456,10 @@ bool Generator::InitNames(std::string& OutErrorString)
 		const FNameArrayLayout* L = static_cast<const FNameArrayLayout*>(GLayouts.NamesLayout.get());
 		GLogger.FmtWrite(ELogLevel::Info, "GNames layout type: TNameArray\n");
 		GLogger.FmtWrite(ELogLevel::Info, "TNameArray::ElementsPerChunk: 0x{:X}\n", (uint32_t)L->ElementsPerChunk);
-		GLogger.FmtWrite(ELogLevel::Info, "TNameArray::Chunks: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Chunks, GMemory->Read<uintptr_t>(GNames + L->Chunks));
+		GLogger.FmtWrite(ELogLevel::Info, "TNameArray::Chunks: 0x{:X} -> 0x{:X}\n", (uint32_t)L->Chunks, GDecryptCallbacks.NameArray.Chunks(GMemory->Read<uintptr_t>(GNames + L->Chunks), GNames + L->Chunks));
 		{
 			if (L->NumElements != -1)
-				GLogger.FmtWrite(ELogLevel::Info, "TNameArray::NumElements: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->NumElements, GMemory->Read<int32>(GNames + L->NumElements));
+				GLogger.FmtWrite(ELogLevel::Info, "TNameArray::NumElements: 0x{:X} -> 0x{:X} (Optional)\n", (uint32_t)L->NumElements, GDecryptCallbacks.NameArray.NumElements(GMemory->Read<int32>(GNames + L->NumElements), GNames + L->NumElements));
 		}
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::String: 0x{:X}\n", (uint32_t)L->FNameEntry.String);
 		GLogger.FmtWrite(ELogLevel::Info, "FNameEntry::Index: 0x{:X}\n", (uint32_t)L->FNameEntry.Index);

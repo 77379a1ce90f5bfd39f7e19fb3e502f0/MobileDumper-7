@@ -4,6 +4,7 @@
 
 #include "../../Architecture/IArchDecoder.h"
 #include "../../Memory/IMemory.h"
+#include "../../Utils/Utils.h"
 
 #include "CodeWindow.h"
 
@@ -119,7 +120,7 @@ namespace UEAnalyzerKitty
 				{
 					if (Src >= 0 && Regs[Src].bKnown)
 					{
-						Regs[Dest].Value  = MemoryUtils::WrapAddress(Regs[Src].Value + Insn.Value);
+						Regs[Dest].Value  = Utils::Memory::WrapAddress(Regs[Src].Value + Insn.Value);
 						Regs[Dest].bKnown = true;
 					}
 					else
@@ -140,7 +141,7 @@ namespace UEAnalyzerKitty
 					// uintptr_t, not uint64_t: this is the memory interface's own
 					// address type, and the two differ in the 32-bit build.
 					uintptr_t Pointee   = 0;
-					const uint64_t Slot = MemoryUtils::WrapAddress(Regs[Src].Value + static_cast<uint64_t>(Insn.Offset));
+					const uint64_t Slot = Utils::Memory::WrapAddress(Regs[Src].Value + static_cast<uint64_t>(Insn.Offset));
 					if (Memory->ReadRelocationPointer(static_cast<uintptr_t>(Slot), Pointee) && Pointee &&
 					    Module.FindAddressRegion(Pointee) != nullptr)
 					{

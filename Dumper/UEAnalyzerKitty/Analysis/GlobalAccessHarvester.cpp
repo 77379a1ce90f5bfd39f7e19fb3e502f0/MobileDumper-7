@@ -4,6 +4,7 @@
 
 #include "../../Architecture/IArchDecoder.h"
 #include "../../Memory/IMemory.h"
+#include "../../Utils/Utils.h"
 
 #include "CallGraph.h"
 #include "CodeWindow.h"
@@ -281,7 +282,7 @@ namespace UEAnalyzerKitty
 				{
 					if (Src >= 0 && Regs[Src].bKnown)
 					{
-						const uint64_t G     = MemoryUtils::WrapAddress(Regs[Src].Value + Insn.Value);
+						const uint64_t G     = Utils::Memory::WrapAddress(Regs[Src].Value + Insn.Value);
 						Regs[Dest].Value     = G;
 						Regs[Dest].bKnown    = true;
 						Regs[Dest].bPageBase = false;
@@ -311,7 +312,7 @@ namespace UEAnalyzerKitty
 					// there, since the base register the tracker follows is Rm. It is 0
 					// for every ordinary load, and Offset alone is what gets recorded
 					// as the struct offset.
-					const uint64_t G = MemoryUtils::WrapAddress(Regs[Src].Value + Insn.Value + static_cast<uint64_t>(Insn.Offset));
+					const uint64_t G = Utils::Memory::WrapAddress(Regs[Src].Value + Insn.Value + static_cast<uint64_t>(Insn.Offset));
 
 					// A displacement that completes a page-granular base forms the
 					// address rather than reaching a field within one, so it is no
@@ -389,7 +390,7 @@ namespace UEAnalyzerKitty
 
 					// A composed immediate is an address on the targets that build
 					// them this way, so it wraps like one.
-					const uint64_t V = MemoryUtils::WrapAddress(Imms[Dest]);
+					const uint64_t V = Utils::Memory::WrapAddress(Imms[Dest]);
 					if (Insn.bAddressLike)
 					{
 						// Targets that build addresses from immediate pairs (ARM32

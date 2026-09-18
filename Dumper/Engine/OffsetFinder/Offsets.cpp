@@ -10,6 +10,7 @@
 #include "../Unreal/NameArray.h"
 #include "../Unreal/ObjectArray.h"
 
+#include "DecryptCallbacks.h"
 #include "OffsetFinder.h"
 
 uintptr_t GObjects = 0;
@@ -202,7 +203,8 @@ bool FInGenOffsets::Init_UObject_Flags()
 			void* Ptr = ObjectArray::GetByIndex(i).GetAddress();
 
 			// Look for 0x43 in this object, as it is a really common value for UObject::Flags
-			Offset = OffsetFinder::FindOffset(std::vector{std::pair{Ptr, EnumFlagValueToSearch}}, Offset, 0x40);
+			Offset = OffsetFinder::FindOffset(std::vector{std::pair{Ptr, EnumFlagValueToSearch}}, Offset, 0x40, std::function<int32(int32, uintptr_t)>([](int32 Value, uintptr_t Address)
+			{ return static_cast<int32>(GDecryptCallbacks.UObject.Flags(static_cast<EObjectFlags>(Value), Address)); }));
 
 			if (Offset == OffsetFinder::OffsetNotFound)
 				break; // Early exit
@@ -217,7 +219,8 @@ bool FInGenOffsets::Init_UObject_Flags()
 				if (Counter++ == 0x100)
 					break;
 
-				const int32 TypedValueAtOffset = GMemory->Read<int32>(reinterpret_cast<uintptr_t>(Obj.GetAddress()) + Offset);
+				const uintptr_t FlagsAddr      = reinterpret_cast<uintptr_t>(Obj.GetAddress()) + Offset;
+				const int32 TypedValueAtOffset = static_cast<int32>(GDecryptCallbacks.UObject.Flags(GMemory->Read<EObjectFlags>(FlagsAddr), FlagsAddr));
 
 				if (TypedValueAtOffset == EnumFlagValueToSearch)
 					NumObjectsWithFlagAtOffset++;
@@ -243,7 +246,7 @@ bool FInGenOffsets::Init_UObject_Index()
 	Infos.emplace_back(ObjectArray::GetByIndex(0x055).GetAddress(), 0x055);
 	Infos.emplace_back(ObjectArray::GetByIndex(0x123).GetAddress(), 0x123);
 
-	this->UObject.Index = OffsetFinder::FindOffset<4>(Infos, sizeof(void*)); // Skip VTable
+	this->UObject.Index = OffsetFinder::FindOffset<4>(Infos, sizeof(void*), OffsetFinder::OffsetFinderMaxValue, GDecryptCallbacks.UObject.Index); // Skip VTable
 	return this->UObject.Index != OffsetFinder::OffsetNotFound;
 }
 
@@ -263,8 +266,11 @@ bool FInGenOffsets::Init_UObject_Class()
 			const uint8_t* CurrentClassA = NextClassA;
 			const uint8_t* CurrentClassB = NextClassB;
 
-			NextClassA = reinterpret_cast<const uint8_t*>(GMemory->Read<uintptr_t>(reinterpret_cast<uintptr_t>(NextClassA) + ClassPtrOffset));
-			NextClassB = reinterpret_cast<const uint8_t*>(GMemory->Read<uintptr_t>(reinterpret_cast<uintptr_t>(NextClassB) + ClassPtrOffset));
+			const uintptr_t ClassAddrA = reinterpret_cast<uintptr_t>(NextClassA) + ClassPtrOffset;
+			const uintptr_t ClassAddrB = reinterpret_cast<uintptr_t>(NextClassB) + ClassPtrOffset;
+
+			NextClassA = reinterpret_cast<const uint8_t*>(GDecryptCallbacks.UObject.Class(GMemory->Read<uintptr_t>(ClassAddrA), ClassAddrA));
+			NextClassB = reinterpret_cast<const uint8_t*>(GDecryptCallbacks.UObject.Class(GMemory->Read<uintptr_t>(ClassAddrB), ClassAddrB));
 
 			/* If this was UObject::Class it would never be invalid. The pointer would simply point to itself.*/
 			if (!NextClassA || !NextClassB || !GMemory->IsAddressReadable(reinterpret_cast<uintptr_t>(NextClassA)) || !GMemory->IsAddressReadable(reinterpret_cast<uintptr_t>(NextClassB)))
@@ -283,7 +289,7 @@ bool FInGenOffsets::Init_UObject_Class()
 	int32_t Offset = 0;
 	while (Offset != OffsetFinder::OffsetNotFound)
 	{
-		Offset = OffsetFinder::GetValidPointerOffset<true>(ObjA, ObjB, Offset + sizeof(void*), 0x50);
+		Offset = OffsetFinder::GetValidPointerOffset<true>(ObjA, ObjB, Offset + sizeof(void*), 0x50, false, GDecryptCallbacks.UObject.Class);
 
 		if (IsValidCyclicUClassPtrOffset(ObjA, ObjB, Offset))
 		{
@@ -350,7 +356,7 @@ bool FInGenOffsets::Init_UObject_Outer()
 
 		while (Offset != OffsetFinder::OffsetNotFound)
 		{
-			Offset = OffsetFinder::GetValidPointerOffset(ObjA, ObjB, Offset + sizeof(void*), 0x50);
+			Offset = OffsetFinder::GetValidPointerOffset(ObjA, ObjB, Offset + sizeof(void*), 0x50, false, GDecryptCallbacks.UObject.Outer);
 
 			// Make sure we didn't re-find the Class offset or Index (if the Index filed is a valid pionter for some ungodly reason).
 			if (Offset != this->UObject.Class && Offset != this->UObject.Index)
@@ -399,7 +405,7 @@ void FInGenOffsets::PreInit_FName()
 
 		const uintptr_t NameAddr = reinterpret_cast<uintptr_t>(Obj.GetFName().GetAddress());
 
-		const int32 V0 = GMemory->Read<int32>(NameAddr);
+		const int32 V0 = GDecryptCallbacks.FName.CompIdx(GMemory->Read<int32>(NameAddr), NameAddr);
 		const int32 V4 = GMemory->Read<int32>(NameAddr + 0x4);
 		const int32 V8 = GMemory->Read<int32>(NameAddr + 0x8);
 
@@ -475,7 +481,7 @@ void FInGenOffsets::PostInit_FName()
 
 	const uint8* NameAddress = static_cast<const uint8*>(PlayerStart.GetFName().GetAddress());
 
-	const int32 FNameFirstInt /* ComparisonIndex */        = GMemory->Read<int32>(reinterpret_cast<uintptr_t>(NameAddress));
+	const int32 FNameFirstInt /* ComparisonIndex */        = GDecryptCallbacks.FName.CompIdx(GMemory->Read<int32>(reinterpret_cast<uintptr_t>(NameAddress)), reinterpret_cast<uintptr_t>(NameAddress));
 	const int32 FNameSecondInt /* [Number/DisplayIndex] */ = GMemory->Read<int32>(reinterpret_cast<uintptr_t>(NameAddress) + 0x4);
 
 	if (FNameSize == 0x8 && FNameFirstInt == FNameSecondInt) /* WITH_CASE_PRESERVING_NAME + FNAME_OUTLINE_NUMBER */
@@ -533,7 +539,7 @@ bool FInGenOffsets::Init_UField_Next()
 
 	const auto HighestUObjectOffset = std::max({this->UObject.Index, this->UObject.Name, this->UObject.Flags, this->UObject.Outer, this->UObject.Class});
 
-	this->UField.Next = OffsetFinder::GetValidPointerOffset(KismetSystemLibraryChild, KismetStringLibraryChild, Utils::Align(HighestUObjectOffset + 0x4, static_cast<int>(sizeof(void*))), 0x60);
+	this->UField.Next = OffsetFinder::GetValidPointerOffset(KismetSystemLibraryChild, KismetStringLibraryChild, Utils::Memory::AlignUp(HighestUObjectOffset + 0x4, static_cast<int>(sizeof(void*))), 0x60);
 	return this->UField.Next != OffsetFinder::OffsetNotFound;
 }
 
@@ -1021,7 +1027,8 @@ bool FInGenOffsets::Init_UStruct_ChildProperties()
 
 	auto IsUObject = [this](uintptr_t Val) -> bool
 	{
-		const int32 Idx = GMemory->Read<int32>(Val + this->UObject.Index);
+		const uintptr_t IdxAddr = Val + this->UObject.Index;
+		const int32 Idx         = GDecryptCallbacks.UObject.Index(GMemory->Read<int32>(IdxAddr), IdxAddr);
 		if (Idx < 0 || Idx >= ObjectArray::Num())
 			return false;
 		return ObjectArray::GetByIndex(Idx).GetAddress() == reinterpret_cast<void*>(Val);
@@ -1141,7 +1148,7 @@ bool FInGenOffsets::Init_UStruct_StructBaseChain()
 	Infos.push_back({APlayerController.GetAddress(), CountSuperClasses(APlayerController)});
 	Infos.push_back({AActor.GetAddress(), CountSuperClasses(AActor)});
 
-	constexpr auto FStructBaseChainSize = Utils::Align(sizeof(void*) + sizeof(int32_t), alignof(void*));
+	constexpr auto FStructBaseChainSize = Utils::Memory::AlignUp(sizeof(void*) + sizeof(int32_t), alignof(void*));
 
 	// FStructBaseChain::NumStructBasesInChainMinusOne is at offset sizeof(void*), after StructBaseChainArray
 	const int32 CountOffset = OffsetFinder::FindOffset<sizeof(void*)>(Infos, UStructStart, UStructEnd - FStructBaseChainSize);

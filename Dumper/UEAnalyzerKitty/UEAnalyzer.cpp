@@ -130,7 +130,9 @@ namespace UEAnalyzerKitty
 
 			AccessRank.reserve(Ranked.size());
 			for (size_t i = 0; i < Ranked.size(); ++i)
+			{
 				AccessRank.emplace(Ranked[i].first, static_cast<uint32_t>(i) + 1u);
+			}
 			RankedCount = static_cast<uint32_t>(Ranked.size());
 		}
 	};
@@ -203,7 +205,9 @@ namespace UEAnalyzerKitty
 		const auto ScanLiterals = [&]
 		{
 			for (Analysis::TargetAnalysis& T : State->Targets)
+			{
 				T.Anchors.Run(Memory, State->Module, T.Strategy->ProximityAnchors());
+			}
 			State->TChar = DetectTCharKind(Memory, &State->TCharUtf16Hits, &State->TCharUtf32Hits);
 		};
 
@@ -226,7 +230,7 @@ namespace UEAnalyzerKitty
 			// by a scope guard rather than by a statement that unwinding can skip.
 			std::exception_ptr ScanError;
 			{
-				std::jthread Scanner([&]
+				std::thread Scanner([&]
 				{
 					try
 					{
@@ -237,6 +241,21 @@ namespace UEAnalyzerKitty
 						ScanError = std::current_exception();
 					}
 				});
+
+				// std::jthread would join automatically here, but its stdlib support is
+				// still missing or partial on some shipped toolchains (notably Apple's
+				// libc++); a plain std::thread plus an explicit scope guard gets the same
+				// join-before-unwind-escapes guarantee without depending on it.
+				struct FJoinOnExit
+				{
+					std::thread& T;
+					~FJoinOnExit()
+					{
+						if (T.joinable())
+							T.join();
+					}
+				} JoinScanner{Scanner};
+
 				bHarvested = Harvest_();
 			}
 
@@ -283,8 +302,12 @@ namespace UEAnalyzerKitty
 			if (!TargetName)
 				return nullptr;
 			for (const auto& Entry : State.Targets)
+			{
 				if (std::strcmp(Entry.Strategy->Name(), TargetName) == 0)
+				{
 					return &Entry;
+				}
+			}
 			return nullptr;
 		}
 	} // namespace
@@ -343,11 +366,13 @@ namespace UEAnalyzerKitty
 		const LocateResult R = Run(Out.Target, {});
 		Out.CandidateCount   = R.Candidates.size();
 		for (size_t i = 0; i < R.Candidates.size(); ++i)
+		{
 			if (R.Candidates[i].Address == Address)
 			{
 				Out.Rank = i + 1;
 				break;
 			}
+		}
 		Out.bAnswer = R.bVerified && Out.Rank == 1;
 
 		char Buf[192];
@@ -367,11 +392,13 @@ namespace UEAnalyzerKitty
 
 		size_t FullRank = 0;
 		for (size_t i = 0; i < Scored.size(); ++i)
+		{
 			if (Scored[i].Address == Address)
 			{
 				FullRank = i + 1;
 				break;
 			}
+		}
 
 		if (FullRank)
 			std::snprintf(Buf, sizeof(Buf), "verified, scored rank %zu of %zu - the strategy keeps %zu (%u accesses, %u pointer-width)", FullRank, Scored.size(), kMaxScoredCandidates, Info->Count, Info->WideAccesses);
@@ -419,7 +446,9 @@ namespace UEAnalyzerKitty
 		// mix-up that a single verdict would not.
 		Out.Targets.reserve(State_->Targets.size());
 		for (const Analysis::TargetAnalysis& T : State_->Targets)
+		{
 			Out.Targets.push_back(AssessAddress(T.Strategy->Name(), Address));
+		}
 
 		return Out;
 	}
@@ -432,7 +461,9 @@ namespace UEAnalyzerKitty
 
 		Names.reserve(State_->Targets.size());
 		for (const Analysis::TargetAnalysis& T : State_->Targets)
+		{
 			Names.emplace_back(T.Strategy->Name());
+		}
 		return Names;
 	}
 

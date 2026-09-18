@@ -20,10 +20,7 @@ private:
 	static inline std::function<uintptr_t(int32 Index)> ByIndexFn = nullptr;
 
 public:
-	static inline std::function<void(uintptr_t&)> DecryptObjectItemFn = nullptr;
-
 	inline static void SetByIndexFn(const std::function<uintptr_t(int32 Index)>& Fn) { ByIndexFn = Fn; }
-	inline static void SetDecryptObjectItemFn(const std::function<void(uintptr_t&)>& Fn) { DecryptObjectItemFn = Fn; }
 
 	static int32 Num();
 

@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "../Engine/OffsetFinder/DecryptCallbacks.h"
 #include "../Engine/OffsetFinder/Offsets.h"
 #include "../Engine/Unreal/ObjectArray.h"
 #include "../Memory/IMemory.h"
@@ -137,7 +138,7 @@ public:
 #endif
 			if (Address != 0)
 			{
-				Address = MemoryUtils::AlignUp(Address + 1, static_cast<uintptr_t>(sizeof(uintptr_t)));
+				Address = Utils::Memory::AlignUp(Address + 1, static_cast<uintptr_t>(sizeof(uintptr_t)));
 				GLogger.FmtWrite(ELogLevel::Info, "GetGNames: GNames Resolved via exported symbol \"_ZN5FName16GetIsInitializedEv\"\n");
 				return Address;
 			}
@@ -204,6 +205,12 @@ public:
 	inline virtual void OverrideInSKOffsets(FInSDKOffsets& Offsets) const { ((void)Offsets); }
 
 	/**
+	 * @brief Applies profile-specific value decryption overrides.
+	 * @param[in,out] Callbacks Decrypt callbacks to override.
+	 */
+	inline virtual void OverrideDecryptCallbacks(FDecryptCallbacks& Callbacks) const { ((void)Callbacks); }
+
+	/**
 	 * @brief Retrieves an FObjectItem by index.
 	 * @param[in] ObjectsPtr GObjects address.
 	 * @param[in] Layout GObjects layout.
@@ -218,29 +225,24 @@ public:
 		if (Layout->GetType() == EObjectsType::Array)
 		{
 			const FFixedUObjectArrayLayout* L = static_cast<const FFixedUObjectArrayLayout*>(Layout.get());
-			uintptr_t BaseAddr                = GMemory->Read<uintptr_t>(ObjectsPtr + L->Objects);
+			const uintptr_t ObjectsAddr       = ObjectsPtr + L->Objects;
+			uintptr_t BaseAddr                = GDecryptCallbacks.FixedObjects.Objects(GMemory->Read<uintptr_t>(ObjectsAddr), ObjectsAddr);
 			uintptr_t ItemAddr                = BaseAddr + Index * L->FUObjectItem.Size;
-			return GMemory->Read<uintptr_t>(ItemAddr + L->FUObjectItem.Object);
+			const uintptr_t ObjectAddr        = ItemAddr + L->FUObjectItem.Object;
+			return GDecryptCallbacks.FixedObjects.FUObjectItem.Object(GMemory->Read<uintptr_t>(ObjectAddr), ObjectAddr);
 		}
 
 		const FChunkedUObjectArrayLayout* L = static_cast<const FChunkedUObjectArrayLayout*>(Layout.get());
 		const int32 ChunkIndex              = Index / L->ElementsPerChunk;
 		const int32 InChunkIdx              = Index % L->ElementsPerChunk;
-		uintptr_t ChunksBase                = GMemory->Read<uintptr_t>(ObjectsPtr + L->Objects);
+		const uintptr_t ObjectsAddr         = ObjectsPtr + L->Objects;
+		uintptr_t ChunksBase                = GDecryptCallbacks.ChunkedObjects.Objects(GMemory->Read<uintptr_t>(ObjectsAddr), ObjectsAddr);
 		uintptr_t ChunkAddr                 = GMemory->Read<uintptr_t>(ChunksBase + ChunkIndex * sizeof(void*));
 		uintptr_t ItemAddr                  = ChunkAddr + InChunkIdx * L->FUObjectItem.Size;
 
-		uintptr_t ObjectItem = GMemory->Read<uintptr_t>(ItemAddr + L->FUObjectItem.Object);
-		DecryptObjectItem(ObjectItem);
-
-		return ObjectItem;
+		const uintptr_t ObjectAddr = ItemAddr + L->FUObjectItem.Object;
+		return GDecryptCallbacks.ChunkedObjects.FUObjectItem.Object(GMemory->Read<uintptr_t>(ObjectAddr), ObjectAddr);
 	}
-
-	/**
-	 * @brief Function to decrypt an FObjectItem entry.
-	 * @param[in,out] ObjectItem Object item to decrypt.
-	 */
-	inline virtual void DecryptObjectItem(uintptr_t& ObjectItem) const { ((void)ObjectItem); }
 
 	/**
 	 * @brief Retrieves a FNameEntry by index.
@@ -318,7 +320,8 @@ public:
 		{
 			FNameArrayLayout* Layout = reinterpret_cast<FNameArrayLayout*>(NamesLayout.get());
 
-			const int32 NameIdx = GMemory->Read<int32>(NameEntry + Layout->FNameEntry.Index);
+			const uintptr_t IndexAddr = NameEntry + Layout->FNameEntry.Index;
+			const int32 NameIdx       = static_cast<int32>(GDecryptCallbacks.NameArray.FNameEntry.Index(GMemory->Read<uint32>(IndexAddr), IndexAddr));
 
 			IsWide  = Layout->FNameEntry.GetIsWide ? Layout->FNameEntry.GetIsWide(NameIdx) : (NameIdx & 1);
 			StrLen  = GSettings.General.MaxFNameLen;
@@ -328,7 +331,8 @@ public:
 		{
 			auto Layout = reinterpret_cast<FNamePoolLayout*>(NamesLayout.get());
 
-			const uint16 HeaderWithoutNumber = GMemory->Read<uint16>(NameEntry + Layout->FNameEntry.Header);
+			const uintptr_t HeaderAddr       = NameEntry + Layout->FNameEntry.Header;
+			const uint16 HeaderWithoutNumber = GDecryptCallbacks.NamePool.FNameEntry.Header(GMemory->Read<uint16>(HeaderAddr), HeaderAddr);
 			const int32 NameLen              = Layout->FNameEntry.GetLength(HeaderWithoutNumber);
 
 			if (NameLen == 0)

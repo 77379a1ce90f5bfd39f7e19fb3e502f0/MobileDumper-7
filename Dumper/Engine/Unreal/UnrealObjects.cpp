@@ -5,6 +5,7 @@
 #include "../../Memory/IMemory.h"
 #include "../../Utils/Logger.h"
 
+#include "../OffsetFinder/DecryptCallbacks.h"
 #include "../OffsetFinder/Offsets.h"
 
 #include "ObjectArray.h"
@@ -282,17 +283,20 @@ void* UEObject::GetVft() const
 
 EObjectFlags UEObject::GetFlags() const
 {
-	return GMemory->Read<EObjectFlags>(reinterpret_cast<uintptr_t>(Object) + GOffsets.UObject.Flags);
+	const uintptr_t Addr = reinterpret_cast<uintptr_t>(Object) + GOffsets.UObject.Flags;
+	return GDecryptCallbacks.UObject.Flags(GMemory->Read<EObjectFlags>(Addr), Addr);
 }
 
 int32 UEObject::GetIndex() const
 {
-	return GMemory->Read<int32>(reinterpret_cast<uintptr_t>(Object) + GOffsets.UObject.Index);
+	const uintptr_t Addr = reinterpret_cast<uintptr_t>(Object) + GOffsets.UObject.Index;
+	return GDecryptCallbacks.UObject.Index(GMemory->Read<int32>(Addr), Addr);
 }
 
 UEClass UEObject::GetClass() const
 {
-	return UEClass(reinterpret_cast<void*>(GMemory->Read<uintptr_t>(reinterpret_cast<uintptr_t>(Object) + GOffsets.UObject.Class)));
+	const uintptr_t Addr = reinterpret_cast<uintptr_t>(Object) + GOffsets.UObject.Class;
+	return UEClass(reinterpret_cast<void*>(GDecryptCallbacks.UObject.Class(GMemory->Read<uintptr_t>(Addr), Addr)));
 }
 
 FName UEObject::GetFName() const
@@ -302,7 +306,8 @@ FName UEObject::GetFName() const
 
 UEObject UEObject::GetOuter() const
 {
-	return UEObject(reinterpret_cast<void*>(GMemory->Read<uintptr_t>(reinterpret_cast<uintptr_t>(Object) + GOffsets.UObject.Outer)));
+	const uintptr_t Addr = reinterpret_cast<uintptr_t>(Object) + GOffsets.UObject.Outer;
+	return UEObject(reinterpret_cast<void*>(GDecryptCallbacks.UObject.Outer(GMemory->Read<uintptr_t>(Addr), Addr)));
 }
 
 int32 UEObject::GetPackageIndex() const

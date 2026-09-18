@@ -6,6 +6,7 @@
 #include "../../Utils/Logger.h"
 #include "../../Utils/Utils.h"
 
+#include "../OffsetFinder/DecryptCallbacks.h"
 #include "../OffsetFinder/Offsets.h"
 
 #include "UnrealTypes.h"
@@ -46,7 +47,8 @@ int32 NameArray::GetNumElements()
 	if (NamesLayout->NumElements == -1)
 		return 0;
 
-	return GMemory->Read<int32>(GNames + NamesLayout->NumElements);
+	const uintptr_t Addr = GNames + NamesLayout->NumElements;
+	return GDecryptCallbacks.NameArray.NumElements(GMemory->Read<int32>(Addr), Addr);
 }
 
 int32 NameArray::GetNumChunks()
@@ -55,7 +57,8 @@ int32 NameArray::GetNumChunks()
 	if (!NamesLayout || NamesLayout->GetType() != ENamesType::Pool)
 		return 0;
 
-	return GMemory->Read<int32>(GNames + NamesLayout->MaxChunkIndex);
+	const uintptr_t Addr = GNames + NamesLayout->MaxChunkIndex;
+	return GDecryptCallbacks.NamePool.MaxChunkIndex(GMemory->Read<int32>(Addr), Addr);
 }
 
 int32 NameArray::GetByteCursor()
@@ -64,7 +67,8 @@ int32 NameArray::GetByteCursor()
 	if (!NamesLayout || NamesLayout->GetType() != ENamesType::Pool)
 		return 0;
 
-	return GMemory->Read<int32>(GNames + NamesLayout->ByteCursor);
+	const uintptr_t Addr = GNames + NamesLayout->ByteCursor;
+	return GDecryptCallbacks.NamePool.ByteCursor(GMemory->Read<int32>(Addr), Addr);
 }
 
 FNameEntry NameArray::GetNameEntry(const void* Name)

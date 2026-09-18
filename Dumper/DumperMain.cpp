@@ -117,6 +117,15 @@ bool FDumperMain::Run(std::string& OutDumpZip, std::string& OutErrorString)
 		GLogger.FmtWrite(ELogLevel::Info, "==================\n");
 	}
 
+
+	OnProgressCallback("Initializing Decrypt Callbacks...\n");
+	{
+		{
+			GProfile->OverrideDecryptCallbacks(GDecryptCallbacks);
+		}
+		GLogger.FmtWrite(ELogLevel::Info, "==================\n");
+	}
+
 	OnProgressCallback("Initializing Objects...\n");
 	{
 		GLogger.FmtWrite(ELogLevel::Info, "=== Objects ===\n");

@@ -15,56 +15,6 @@
 #include <utility>
 #include <vector>
 
-namespace MemoryUtils
-{
-	/// @brief True when this build itself is 32-bit.
-	consteval bool Is32Bit() { return sizeof(void*) == 4; }
-
-	/// @brief Truncates a computed address to the analysed image's pointer width.
-	inline uint64_t WrapAddress(uint64_t Address)
-	{
-		return static_cast<uint64_t>(static_cast<uintptr_t>(Address));
-	}
-
-	/// @brief Aligns a value down to the specified alignment.
-	template <typename T, typename U>
-	constexpr T AlignDown(T Value, U Alignment)
-	{
-		return Value / Alignment * Alignment;
-	}
-
-	/// @brief Aligns a value up to the specified alignment.
-	template <typename T, typename U>
-	constexpr T AlignUp(T Value, U Alignment)
-	{
-		return ((Value + Alignment - 1) / Alignment) * Alignment;
-	}
-
-	/// @brief Checks whether a value is aligned to the specified alignment.
-	template <typename T, typename U>
-	constexpr bool IsAligned(T Value, U Alignment)
-	{
-		return (Value % Alignment) == 0;
-	}
-
-	/// @brief Removes top-byte pointer tags from a pointer.
-	inline uintptr_t UntagPointer(uintptr_t ptr)
-	{
-#if defined(__LP64__)
-		return ptr & ((static_cast<uintptr_t>(1) << 56) - 1);
-#else
-		return ptr;
-#endif
-	}
-
-	/// @brief Removes top-byte pointer tags from a pointer.
-	template <typename T>
-	inline T* UntagPointer(T* ptr)
-	{
-		return reinterpret_cast<T*>(UntagPointer(reinterpret_cast<uintptr_t>(ptr)));
-	}
-}
-
 /**
  * @brief One mapped region: a segment of an image, or a line of /proc/pid/maps.
  */

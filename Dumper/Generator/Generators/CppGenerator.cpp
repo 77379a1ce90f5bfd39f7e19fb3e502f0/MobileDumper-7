@@ -1886,7 +1886,7 @@ void CppGenerator::WriteFileHead(StreamType& File, PackageInfoHandle Package, EF
 
 	File << "\n";
 
-	if constexpr (MemoryUtils::Is32Bit())
+	if constexpr (Utils::Memory::Is32Bit())
 	{
 		File << "#pragma pack(push, 0x4)\n";
 	}
@@ -1927,7 +1927,7 @@ void CppGenerator::WriteFileEnd(StreamType& File, EFileType Type)
 			File << "\nSDK_PARAM_NAMESPACE_START\n";
 	}
 
-	if constexpr (MemoryUtils::Is32Bit())
+	if constexpr (Utils::Memory::Is32Bit())
 	{
 		File << "#pragma pack(pop)\n";
 	}

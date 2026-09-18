@@ -6,6 +6,7 @@
 #include "../../Memory/IMemory.h"
 #include "../../Utils/Logger.h"
 
+#include "../OffsetFinder/DecryptCallbacks.h"
 #include "../OffsetFinder/Layouts.h"
 #include "../OffsetFinder/Offsets.h"
 
@@ -20,11 +21,15 @@ int32 ObjectArray::Num()
 	if (GLayouts.ObjectsLayout->GetType() == EObjectsType::Array)
 	{
 		FFixedUObjectArrayLayout* objLayout = reinterpret_cast<FFixedUObjectArrayLayout*>(GLayouts.ObjectsLayout.get());
-		return GMemory->Read<int32>(GObjects + objLayout->NumObjects);
+
+		const uintptr_t Addr = GObjects + objLayout->NumObjects;
+		return GDecryptCallbacks.FixedObjects.NumObjects(GMemory->Read<int32>(Addr), Addr);
 	}
 
 	FChunkedUObjectArrayLayout* objLayout = reinterpret_cast<FChunkedUObjectArrayLayout*>(GLayouts.ObjectsLayout.get());
-	return GMemory->Read<int32>(GObjects + objLayout->NumElements);
+
+	const uintptr_t Addr = GObjects + objLayout->NumElements;
+	return GDecryptCallbacks.ChunkedObjects.NumElements(GMemory->Read<int32>(Addr), Addr);
 }
 
 template <typename UEType>

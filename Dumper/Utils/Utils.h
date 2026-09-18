@@ -52,16 +52,24 @@ namespace Utils
 		return out.str();
 	}
 
-	/// @brief Rounds Size up to the next multiple of Alignment.
-	template <typename T>
-	constexpr T Align(T Size, T Alignment)
+	/// @brief Formats a byte count as a value with the best-fitting unit (B..TB).
+	inline std::string SizeToString(uint64_t Bytes)
 	{
-		static_assert(std::is_integral_v<T>, "Align can only hanlde integral types!");
-		assert(Alignment != 0 && "Alignment was 0, division by zero exception.");
+		std::ostringstream out;
+		out << std::fixed << std::setprecision(2);
 
-		const T RequiredAlign = Alignment - (Size % Alignment);
+		if (Bytes < 1024ull)
+			out << Bytes << " B";
+		else if (Bytes < 1024ull * 1024)
+			out << Bytes / 1024.0 << " KB";
+		else if (Bytes < 1024ull * 1024 * 1024)
+			out << Bytes / (1024.0 * 1024) << " MB";
+		else if (Bytes < 1024ull * 1024 * 1024 * 1024)
+			out << Bytes / (1024.0 * 1024 * 1024) << " GB";
+		else
+			out << Bytes / (1024.0 * 1024 * 1024 * 1024) << " TB";
 
-		return Size + (RequiredAlign != Alignment ? RequiredAlign : 0x0);
+		return out.str();
 	}
 
 	/// @brief String encoding conversions and small text helpers.
@@ -217,6 +225,21 @@ namespace Utils
 		}
 	}
 
+	/// @brief Zip Utils.
+	namespace Zip
+	{
+		/// @brief Zips every file under InDir, recursively.
+		bool CreateZipWithDirectory(const std::string& InDir, int CompressionLevel, const std::string& OutZip);
+		/// @brief Zips a single file as one entry named after its filename.
+		bool CreateZipWithFile(const std::string& InFile, int CompressionLevel, const std::string& OutZip);
+		/// @brief Extracts every entry of InZip into OutFolder.
+		bool ExtractZipToFolder(const std::string& InZip, const std::string& OutFolder);
+		/// @brief Extracts one entry (EntryPath) of InZip into OutFolder.
+		bool ExtractZipEntryToFolder(const std::string& InZip, const std::string& EntryPath, const std::string& OutFolder);
+		/// @brief OutData is allocated by the zip library — caller must free() it.
+		bool ExtractZipEntryToMemory(const std::string& InZip, const std::string& EntryPath, void** OutData, size_t* OutDataSize);
+	}
+
 	/// @brief ARM64 Utils.
 	namespace Arm64
 	{
@@ -238,19 +261,326 @@ namespace Utils
 		uintptr_t Find_LDR_ADD_PC_Address(const std::vector<uint32_t>& Insns, uintptr_t Address, IMemory* Memory);
 	}
 
-	/// @brief Zip Utils.
-	namespace Zip
+	/// @brief Pointer/address-width helpers, alignment, and low-level integer ops.
+	namespace Memory
 	{
-		/// @brief Zips every file under InDir, recursively.
-		bool CreateZipWithDirectory(const std::string& InDir, int CompressionLevel, const std::string& OutZip);
-		/// @brief Zips a single file as one entry named after its filename.
-		bool CreateZipWithFile(const std::string& InFile, int CompressionLevel, const std::string& OutZip);
-		/// @brief Extracts every entry of InZip into OutFolder.
-		bool ExtractZipToFolder(const std::string& InZip, const std::string& OutFolder);
-		/// @brief Extracts one entry (EntryPath) of InZip into OutFolder.
-		bool ExtractZipEntryToFolder(const std::string& InZip, const std::string& EntryPath, const std::string& OutFolder);
-		/// @brief OutData is allocated by the zip library — caller must free() it.
-		bool ExtractZipEntryToMemory(const std::string& InZip, const std::string& EntryPath, void** OutData, size_t* OutDataSize);
+		/// @brief True when this build itself is 32-bit.
+		consteval bool Is32Bit() { return sizeof(void*) == 4; }
+
+		/// @brief Truncates a computed address to the analysed image's pointer width.
+		inline uint64_t WrapAddress(uint64_t Address)
+		{
+			return static_cast<uint64_t>(static_cast<uintptr_t>(Address));
+		}
+
+		/// @brief Aligns a value down to the specified alignment.
+		template <typename T, typename U>
+		constexpr T AlignDown(T Value, U Alignment)
+		{
+			assert(Alignment != 0 && "Alignment was 0, division by zero exception.");
+
+			return Value / Alignment * Alignment;
+		}
+
+		/// @brief Aligns a value up to the specified alignment.
+		template <typename T, typename U>
+		constexpr T AlignUp(T Value, U Alignment)
+		{
+			assert(Alignment != 0 && "Alignment was 0, division by zero exception.");
+
+			return ((Value + Alignment - 1) / Alignment) * Alignment;
+		}
+
+		/// @brief Checks whether a value is aligned to the specified alignment.
+		template <typename T, typename U>
+		constexpr bool IsAligned(T Value, U Alignment)
+		{
+			assert(Alignment != 0 && "Alignment was 0, division by zero exception.");
+
+			return (Value % Alignment) == 0;
+		}
+
+		/// @brief Removes top-byte pointer tags from a pointer.
+		inline uintptr_t UntagPointer(uintptr_t ptr)
+		{
+#if defined(__LP64__)
+			return ptr & ((static_cast<uintptr_t>(1) << 56) - 1);
+#else
+			return ptr;
+#endif
+		}
+
+		/// @brief Removes top-byte pointer tags from a pointer.
+		template <typename T>
+		inline T* UntagPointer(T* ptr)
+		{
+			return reinterpret_cast<T*>(UntagPointer(reinterpret_cast<uintptr_t>(ptr)));
+		}
+
+		/// @brief Byte-swaps a 2/4/8-byte integral value, picking the width off sizeof(T).
+		template <typename T>
+		inline T Swap(T Value)
+		{
+			static_assert(std::is_integral_v<T>, "Swap can only handle integral types!");
+			static_assert(sizeof(T) == 2 || sizeof(T) == 4 || sizeof(T) == 8, "Swap only supports 2/4/8-byte types!");
+
+			if constexpr (sizeof(T) == 2)
+				return static_cast<T>(KittyAsm::swap16(static_cast<uint16_t>(Value)));
+			else if constexpr (sizeof(T) == 4)
+				return static_cast<T>(KittyAsm::swap32(static_cast<uint32_t>(Value)));
+			else
+				return static_cast<T>(KittyAsm::swap64(static_cast<uint64_t>(Value)));
+		}
+
+		/// @brief Rotates a 1/2/4/8-byte unsigned value right, picking the width off sizeof(T).
+		template <typename T>
+		inline T Ror(T Value, unsigned int Shift)
+		{
+			static_assert(std::is_unsigned_v<T>, "Ror can only handle unsigned integral types!");
+
+			if constexpr (sizeof(T) == 1)
+				return static_cast<T>(KittyAsm::ror8(static_cast<uint8_t>(Value), Shift));
+			else if constexpr (sizeof(T) == 2)
+				return static_cast<T>(KittyAsm::ror16(static_cast<uint16_t>(Value), Shift));
+			else if constexpr (sizeof(T) == 4)
+				return static_cast<T>(KittyAsm::ror32(static_cast<uint32_t>(Value), Shift));
+			else
+				return static_cast<T>(KittyAsm::ror64(static_cast<uint64_t>(Value), Shift));
+		}
+
+		/// @brief Rotates a 1/2/4/8-byte unsigned value left, picking the width off sizeof(T).
+		template <typename T>
+		inline T Rol(T Value, unsigned int Shift)
+		{
+			static_assert(std::is_unsigned_v<T>, "Rol can only handle unsigned integral types!");
+
+			if constexpr (sizeof(T) == 1)
+				return static_cast<T>(KittyAsm::rol8(static_cast<uint8_t>(Value), Shift));
+			else if constexpr (sizeof(T) == 2)
+				return static_cast<T>(KittyAsm::rol16(static_cast<uint16_t>(Value), Shift));
+			else if constexpr (sizeof(T) == 4)
+				return static_cast<T>(KittyAsm::rol32(static_cast<uint32_t>(Value), Shift));
+			else
+				return static_cast<T>(KittyAsm::rol64(static_cast<uint64_t>(Value), Shift));
+		}
+	}
+
+	/// @brief IDA compatible byte/word/dword accessors.
+	namespace IDA
+	{
+		/// @brief Byte n of x, by index. Read-only (const uint8_t&) if x is const.
+		template <typename T>
+		inline auto& BYTEn(T& x, int n)
+		{
+			if constexpr (std::is_const_v<T>)
+				return *(reinterpret_cast<const uint8_t*>(&x) + n);
+			else
+				return *(reinterpret_cast<uint8_t*>(&x) + n);
+		}
+
+		/// @brief Signed byte n of x, by index. Read-only if x is const.
+		template <typename T>
+		inline auto& SBYTEn(T& x, int n)
+		{
+			if constexpr (std::is_const_v<T>)
+				return *(reinterpret_cast<const int8_t*>(&x) + n);
+			else
+				return *(reinterpret_cast<int8_t*>(&x) + n);
+		}
+
+		/// @brief 16-bit word n of x, by index. Read-only if x is const.
+		template <typename T>
+		inline auto& WORDn(T& x, int n)
+		{
+			if constexpr (std::is_const_v<T>)
+				return *(reinterpret_cast<const uint16_t*>(&x) + n);
+			else
+				return *(reinterpret_cast<uint16_t*>(&x) + n);
+		}
+
+		/// @brief Signed 16-bit word n of x, by index. Read-only if x is const.
+		template <typename T>
+		inline auto& SWORDn(T& x, int n)
+		{
+			if constexpr (std::is_const_v<T>)
+				return *(reinterpret_cast<const int16_t*>(&x) + n);
+			else
+				return *(reinterpret_cast<int16_t*>(&x) + n);
+		}
+
+		/// @brief 32-bit dword n of x, by index. Read-only if x is const.
+		template <typename T>
+		inline auto& DWORDn(T& x, int n)
+		{
+			if constexpr (std::is_const_v<T>)
+				return *(reinterpret_cast<const uint32_t*>(&x) + n);
+			else
+				return *(reinterpret_cast<uint32_t*>(&x) + n);
+		}
+
+		/// @brief Signed 32-bit dword n of x, by index. Read-only if x is const.
+		template <typename T>
+		inline auto& SDWORDn(T& x, int n)
+		{
+			if constexpr (std::is_const_v<T>)
+				return *(reinterpret_cast<const int32_t*>(&x) + n);
+			else
+				return *(reinterpret_cast<int32_t*>(&x) + n);
+		}
+
+		/// @brief Lowest byte of x.
+		template <typename T>
+		inline auto& LOBYTE(T& x)
+		{
+			return BYTEn(x, 0);
+		}
+
+		/// @brief Second-lowest byte of x.
+		template <typename T>
+		inline auto& HIBYTE(T& x)
+		{
+			return BYTEn(x, 1);
+		}
+
+		/// @brief Byte 1 of x.
+		template <typename T>
+		inline auto& BYTE1(T& x)
+		{
+			return BYTEn(x, 1);
+		}
+
+		/// @brief Byte 2 of x.
+		template <typename T>
+		inline auto& BYTE2(T& x)
+		{
+			return BYTEn(x, 2);
+		}
+
+		/// @brief Byte 3 of x.
+		template <typename T>
+		inline auto& BYTE3(T& x)
+		{
+			return BYTEn(x, 3);
+		}
+
+		/// @brief Byte 4 of x.
+		template <typename T>
+		inline auto& BYTE4(T& x)
+		{
+			return BYTEn(x, 4);
+		}
+
+		/// @brief Byte 5 of x.
+		template <typename T>
+		inline auto& BYTE5(T& x)
+		{
+			return BYTEn(x, 5);
+		}
+
+		/// @brief Byte 6 of x.
+		template <typename T>
+		inline auto& BYTE6(T& x)
+		{
+			return BYTEn(x, 6);
+		}
+
+		/// @brief Byte 7 of x.
+		template <typename T>
+		inline auto& BYTE7(T& x)
+		{
+			return BYTEn(x, 7);
+		}
+
+		/// @brief Signed LOBYTE.
+		template <typename T>
+		inline auto& SLOBYTE(T& x)
+		{
+			return SBYTEn(x, 0);
+		}
+
+		/// @brief Signed HIBYTE.
+		template <typename T>
+		inline auto& SHIBYTE(T& x)
+		{
+			return SBYTEn(x, 1);
+		}
+
+		/// @brief Lowest 16-bit word of x.
+		template <typename T>
+		inline auto& LOWORD(T& x)
+		{
+			return WORDn(x, 0);
+		}
+
+		/// @brief Second-lowest 16-bit word of x.
+		template <typename T>
+		inline auto& HIWORD(T& x)
+		{
+			return WORDn(x, 1);
+		}
+
+		/// @brief Word 1 of x.
+		template <typename T>
+		inline auto& WORD1(T& x)
+		{
+			return WORDn(x, 1);
+		}
+
+		/// @brief Word 2 of x.
+		template <typename T>
+		inline auto& WORD2(T& x)
+		{
+			return WORDn(x, 2);
+		}
+
+		/// @brief Word 3 of x.
+		template <typename T>
+		inline auto& WORD3(T& x)
+		{
+			return WORDn(x, 3);
+		}
+
+		/// @brief Signed LOWORD.
+		template <typename T>
+		inline auto& SLOWORD(T& x)
+		{
+			return SWORDn(x, 0);
+		}
+
+		/// @brief Signed HIWORD.
+		template <typename T>
+		inline auto& SHIWORD(T& x)
+		{
+			return SWORDn(x, 1);
+		}
+
+		/// @brief Low 32 bits of a 64-bit x.
+		template <typename T>
+		inline auto& LODWORD(T& x)
+		{
+			return DWORDn(x, 0);
+		}
+
+		/// @brief High 32 bits of a 64-bit x.
+		template <typename T>
+		inline auto& HIDWORD(T& x)
+		{
+			return DWORDn(x, 1);
+		}
+
+		/// @brief Signed LODWORD.
+		template <typename T>
+		inline auto& SLODWORD(T& x)
+		{
+			return SDWORDn(x, 0);
+		}
+
+		/// @brief Signed HIDWORD.
+		template <typename T>
+		inline auto& SHIDWORD(T& x)
+		{
+			return SDWORDn(x, 1);
+		}
 	}
 
 	/// @brief Android binary AndroidManifest.xml parsing.
