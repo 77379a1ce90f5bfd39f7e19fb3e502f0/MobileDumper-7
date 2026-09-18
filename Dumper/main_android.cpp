@@ -100,7 +100,7 @@ bool RunDump(int GamePid, const std::string& GamePackage, EKittyMemOP MemOp = EK
 {
 	auto StartTime = std::chrono::high_resolution_clock::now();
 
-	GSettings.Generator.SDKGenerationPath  = OutputDir ? OutputDir : KittyUtils::Android::getAppExternalDataDir(GamePackage);
+	GSettings.Generator.SDKGenerationPath  = OutputDir ? OutputDir : KittyUtils::Android::getAppExternalFilesDir(GamePackage);
 	GSettings.Generator.SDKGenerationPath += "/MobileDumper-7";
 	{
 		std::error_code Ec;
@@ -186,9 +186,10 @@ DumpLabel:
 		{
 			const std::string ModuleStem = std::filesystem::path(Module.GetPathName()).stem().string();
 
-			const std::string Destination = fmt::format("{}/{}_{}_{:X}-{:X}.so",
+			const std::string Destination = fmt::format("{}/{}_{}_{}_{:X}-{:X}.so",
 			                                            GSettings.Generator.SDKGenerationPath,
 			                                            GamePackage,
+			                                            GProfile ? GProfile->GetGameVersion() : "",
 			                                            ModuleStem.empty() ? "UnrealModule" : ModuleStem,
 			                                            Module.GetStart(),
 			                                            Module.GetEnd());
@@ -196,7 +197,7 @@ DumpLabel:
 			GLogger.FmtWrite(ELogLevel::Info, "Dumping Unreal module to \"{}\"...\n", Destination);
 
 			if (GMemory->DumpUnrealModule(Destination))
-				GLogger.FmtWrite(ELogLevel::Info, "Dumped Unreal module (0x{:X} - 0x{:X}, {} bytes mapped).\n", Module.GetStart(), Module.GetEnd(), Module.GetSize());
+				GLogger.FmtWrite(ELogLevel::Info, "Dumped Unreal module (0x{:X} - 0x{:X}, {} mapped).\n", Module.GetStart(), Module.GetEnd(), Utils::SizeToString(Module.GetSize()));
 			else
 				GLogger.FmtWrite(ELogLevel::Error, "Failed to dump the Unreal module.\n");
 		}
@@ -239,9 +240,11 @@ __attribute__((constructor)) static void OnLibraryLoad()
 	std::thread([]()
 	{
 		int SleepSec = 60;
-		GLogger.FmtWrite(ELogLevel::Info, "Starting after {} seconds.", SleepSec);
+		GLogger.FmtWrite(ELogLevel::Info, "Starting after {} seconds.\n", SleepSec);
 		sleep(SleepSec);
-		RunDump(getpid(), getprogname());
+
+		bool bDumpLib = false;
+		RunDump(getpid(), getprogname(), EK_MEM_OP_SYSCALL, nullptr, bDumpLib, false);
 	}).detach();
 }
 #else
@@ -250,9 +253,11 @@ extern "C" jint JNIEXPORT JNI_OnLoad(JavaVM*, void*)
 	std::thread([]()
 	{
 		int SleepSec = 60;
-		GLogger.FmtWrite(ELogLevel::Info, "Starting after {} seconds.", SleepSec);
+		GLogger.FmtWrite(ELogLevel::Info, "Starting after {} seconds.\n", SleepSec);
 		sleep(SleepSec);
-		RunDump(getpid(), getprogname());
+
+		bool bDumpLib = false;
+		RunDump(getpid(), getprogname(), EK_MEM_OP_SYSCALL, nullptr, bDumpLib, false);
 	}).detach();
 
 	return JNI_VERSION_1_6;
@@ -276,6 +281,7 @@ int main(int Argc, char** Args)
 	argparse::ArgumentParser Program(FDumperMain::kProgramName, FDumperMain::kProgramVer);
 
 	std::string GamePackge, OutputDir;
+	pid_t GamePid     = 0;
 	bool bDumpLib     = false;
 	bool bSuspendGame = false;
 	int MemAccessType = 0;
@@ -318,8 +324,6 @@ int main(int Argc, char** Args)
 		GLogger.FmtWrite(ELogLevel::Info, "{}", Program.help().str());
 		return 1;
 	}
-
-	pid_t GamePid = 0;
 
 	if (GamePackge.empty())
 	{
