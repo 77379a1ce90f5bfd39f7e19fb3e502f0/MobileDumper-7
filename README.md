@@ -135,10 +135,10 @@ UECustomProfiles.push_back(std::make_shared<MyGameProfile>());
 | `DecryptNameChunk(...)` | Name chunk addresses are encrypted |
 | `DecryptNameEntry(...)` | Individual name entry addresses are encrypted |
 | `DecryptUTF8/UTF16/UTF32(...)` | Name strings are encrypted in memory — see Delta Force example below |
-| `DecryptObjectItem(uintptr_t&)` | Object item pointers are encrypted |
 | `ResolveGObjectsLayout(...)` | Auto layout detection fails; provide the layout manually |
 | `ResolveGNamesLayout(...)` | Auto layout detection fails; provide the layout manually |
 | `OverrideSettings(FSettings&)` | Tweak Generator settings for this game |
+| `OverrideDecryptCallbacks(FDecryptCallbacks&)` | Engine values are encrypted in memory |
 
 ### Examples
 
